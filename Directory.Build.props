@@ -1,0 +1,18 @@
+<Project>
+  <PropertyGroup>
+    <Authors>Naxterra</Authors>
+    <Company>Naxterra</Company>
+    <Copyright>Copyright © 2026 Naxterra.</Copyright>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(MSBuildProjectExtension)' == '.csproj'">
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>Creator</_Parameter1>
+      <_Parameter2>Naxterra</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>Owner</_Parameter1>
+      <_Parameter2>Naxterra</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+</Project>

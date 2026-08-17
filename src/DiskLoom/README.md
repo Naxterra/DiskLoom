@@ -1,20 +1,10 @@
-<p align="center"><img src="src/DiskLoom/Assets/DiskLoom-Mark.png" alt="DiskLoom logo" width="168" /></p>
+<p align="center"><img src="https://raw.githubusercontent.com/Naxterra/DiskLoom/main/src/DiskLoom/Assets/DiskLoom-Mark.png" alt="DiskLoom logo" width="168" /></p>
 
 # DiskLoom
-
-[![Build](https://github.com/Naxterra/DiskLoom/actions/workflows/release.yml/badge.svg)](https://github.com/Naxterra/DiskLoom/actions/workflows/release.yml)
-[![Latest release](https://img.shields.io/github/v/release/Naxterra/DiskLoom)](https://github.com/Naxterra/DiskLoom/releases/latest)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Canonical repository: [github.com/Naxterra/DiskLoom](https://github.com/Naxterra/DiskLoom)
 
 DiskLoom is a clean-room Windows 11 storage analyzer built with C#, .NET 11, WinUI 3, and the Windows App SDK. It is not affiliated with JAM Software and does not use TreeSize code, assets, branding, or UI designs.
-
-## Install
-
-Download the x64 MSI or portable ZIP from [GitHub Releases](https://github.com/Naxterra/DiskLoom/releases/latest). The MSI offers optional Start-menu and Desktop shortcuts and Windows Explorer folder/drive integration.
-
-The reusable scanning engine is published as `Naxterra.DiskLoom.Core` under [GitHub Packages](https://github.com/Naxterra/DiskLoom/packages).
 
 ## Included in 0.1
 

@@ -1,0 +1,102 @@
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      DOTNET_NOLOGO: 1
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install .NET 11
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 11.0.x
+          dotnet-quality: preview
+
+      - name: Select version
+        shell: pwsh
+        run: |
+          $version = if ('${{ github.event_name }}' -eq 'release') {
+            '${{ github.event.release.tag_name }}'.TrimStart('v')
+          } else {
+            '0.1.9'
+          }
+          "DISKLOOM_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build, test, publish, and create MSI
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/Build-DiskLoomInstaller.ps1 -Version $env:DISKLOOM_VERSION
+
+      - name: Pack DiskLoom.Core
+        shell: pwsh
+        run: dotnet pack src/DiskLoom.Core/DiskLoom.Core.csproj -c Release --no-build -p:PackageVersion=$env:DISKLOOM_VERSION -o artifacts/packages
+
+      - name: Create portable archive and checksums
+        shell: pwsh
+        run: |
+          $zip = "artifacts/DiskLoom/DiskLoom-$env:DISKLOOM_VERSION-win-x64-portable.zip"
+          Compress-Archive -Path 'artifacts/DiskLoom/win-x64/*' -DestinationPath $zip -CompressionLevel Optimal -Force
+          $assets = @(
+            'artifacts/DiskLoom/installer/DiskLoom-Setup-x64.msi',
+            $zip,
+            "artifacts/packages/Naxterra.DiskLoom.Core.$env:DISKLOOM_VERSION.nupkg"
+          )
+          $assets | ForEach-Object {
+            $hash = Get-FileHash -LiteralPath $_ -Algorithm SHA256
+            "$($hash.Hash)  $([IO.Path]::GetFileName($_))"
+          } | Out-File -FilePath 'artifacts/DiskLoom/SHA256SUMS.txt' -Encoding ascii
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: DiskLoom-${{ env.DISKLOOM_VERSION }}-win-x64
+          if-no-files-found: error
+          path: |
+            artifacts/DiskLoom/installer/DiskLoom-Setup-x64.msi
+            artifacts/DiskLoom/DiskLoom-*-win-x64-portable.zip
+            artifacts/DiskLoom/SHA256SUMS.txt
+            artifacts/packages/*.nupkg
+
+      - name: Attach assets to GitHub Release
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload '${{ github.event.release.tag_name }}' --clobber `
+            'artifacts/DiskLoom/installer/DiskLoom-Setup-x64.msi' `
+            "artifacts/DiskLoom/DiskLoom-$env:DISKLOOM_VERSION-win-x64-portable.zip" `
+            'artifacts/DiskLoom/SHA256SUMS.txt' `
+            "artifacts/packages/Naxterra.DiskLoom.Core.$env:DISKLOOM_VERSION.nupkg"
+
+      - name: Publish GitHub Package
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          dotnet nuget add source 'https://nuget.pkg.github.com/Naxterra/index.json' `
+            --name github `
+            --username '${{ github.actor }}' `
+            --password $env:GITHUB_TOKEN `
+            --store-password-in-clear-text
+          dotnet nuget push "artifacts/packages/Naxterra.DiskLoom.Core.$env:DISKLOOM_VERSION.nupkg" `
+            --source github `
+            --api-key $env:GITHUB_TOKEN `
+            --skip-duplicate
