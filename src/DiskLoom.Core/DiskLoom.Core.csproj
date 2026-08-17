@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0-windows10.0.26100.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.22000.0</SupportedOSPlatformVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackageId>Naxterra.DiskLoom.Core</PackageId>
+    <Description>Core Windows filesystem scanning and storage-analysis engine for DiskLoom.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>windows;storage;filesystem;disk-analysis</PackageTags>
+    <RepositoryUrl>https://github.com/Naxterra/DiskLoom</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/Naxterra/DiskLoom</PackageProjectUrl>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="..\DiskLoom\README.md" Pack="true" PackagePath="\" Link="README.md" />
+  </ItemGroup>
+</Project>

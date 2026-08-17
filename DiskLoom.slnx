@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DiskLoom.Core/DiskLoom.Core.csproj" />
+    <Project Path="src/DiskLoom.Cli/DiskLoom.Cli.csproj" />
+    <Project Path="src/DiskLoom/DiskLoom.csproj">
+      <Platform Project="x64" />
+    </Project>
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DiskLoom.Core.SmokeTests/DiskLoom.Core.SmokeTests.csproj" />
+  </Folder>
+  <Folder Name="/installer/">
+    <Project Path="installer/DiskLoom/DiskLoom.Installer.wixproj" />
+  </Folder>
+</Solution>

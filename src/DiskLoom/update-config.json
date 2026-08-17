@@ -1,0 +1,7 @@
+{
+  "githubRepository": "Naxterra/DiskLoom",
+  "manifestUrl": "",
+  "publisherCertificateSha256": "",
+  "checkOnStartup": true,
+  "checkIntervalHours": 24
+}

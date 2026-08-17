@@ -1,0 +1,21 @@
+<Project Sdk="WixToolset.Sdk/6.0.2">
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <Platform>x64</Platform>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <Cultures>en-US</Cultures>
+    <OutputName>DiskLoom-Setup-x64</OutputName>
+    <OutputPath>$(MSBuildProjectDirectory)\..\..\artifacts\DiskLoom\installer\</OutputPath>
+    <DiskLoomVersion Condition="'$(DiskLoomVersion)' == ''">0.1.9</DiskLoomVersion>
+    <DefineConstants>ProductVersion=$(DiskLoomVersion)</DefineConstants>
+    <DefaultCompressionLevel>high</DefaultCompressionLevel>
+    <SuppressIces>ICE03</SuppressIces>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <BindPath Include="$(MSBuildProjectDirectory)\..\..\artifacts\DiskLoom\win-x64">
+      <BindName>Publish</BindName>
+    </BindPath>
+    <PackageReference Include="WixToolset.UI.wixext" Version="6.0.2" />
+  </ItemGroup>
+</Project>
