@@ -1,0 +1,9 @@
+{
+  "version": "0.2.0",
+  "installerUrl": "https://github.com/Naxterra/DiskLoom/releases/download/v0.2.0/DiskLoom-Setup-x64-0.2.0.msi",
+  "sha256": "REPLACE_WITH_64_HEX_CHARACTERS",
+  "releaseNotes": "Performance improvements and fixes.",
+  "releaseNotesUrl": "https://github.com/Naxterra/DiskLoom/releases/tag/v0.2.0",
+  "publishedUtc": "2026-08-17T20:00:00Z",
+  "mandatory": false
+}

@@ -1,0 +1,515 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="DiskLoom.MainPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Loaded="Page_Loaded">
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <CommandBar DefaultLabelPosition="Right" IsDynamicOverflowEnabled="True">
+            <AppBarButton x:Uid="ScanFolderButton" Label="Scan folder" Click="ScanFolder_Click">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE8B7;" /></AppBarButton.Icon>
+            </AppBarButton>
+            <AppBarButton x:Name="CancelButton" x:Uid="CancelButton" Label="Cancel" Click="Cancel_Click" IsEnabled="False">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE711;" /></AppBarButton.Icon>
+            </AppBarButton>
+            <AppBarButton x:Name="RefreshButton" x:Uid="RefreshButton" Label="Rescan" Click="Refresh_Click" IsEnabled="False">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE72C;" /></AppBarButton.Icon>
+            </AppBarButton>
+            <AppBarSeparator />
+            <AppBarButton x:Name="ExportButton" x:Uid="ExportButton" Label="Export" Click="Export_Click" IsEnabled="False">
+                <AppBarButton.Icon><FontIcon Glyph="&#xEDE1;" /></AppBarButton.Icon>
+            </AppBarButton>
+            <AppBarButton x:Name="SaveSnapshotButton" x:Uid="SaveSnapshotButton" Label="Save snapshot" Click="SaveSnapshot_Click" IsEnabled="False">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE74E;" /></AppBarButton.Icon>
+            </AppBarButton>
+            <AppBarButton x:Name="CompareButton" x:Uid="CompareButton" Label="Compare" Click="Compare_Click" IsEnabled="False">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE8AB;" /></AppBarButton.Icon>
+            </AppBarButton>
+            <AppBarSeparator />
+            <AppBarButton x:Uid="CheckUpdatesButton" Label="Check updates" Click="CheckUpdates_Click">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE895;" /></AppBarButton.Icon>
+            </AppBarButton>
+            <CommandBar.SecondaryCommands>
+                <AppBarButton x:Uid="SettingsMenu" Label="Settings" Click="Settings_Click" />
+                <AppBarButton x:Uid="CopyCurrentPathMenu" Label="Copy current path" Click="CopyPath_Click" />
+                <AppBarButton x:Uid="AboutMenu" Label="About DiskLoom" Click="About_Click" />
+            </CommandBar.SecondaryCommands>
+        </CommandBar>
+
+        <Border Grid.Row="1" Padding="12,8" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,1,0,1">
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="210" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Button x:Name="UpButton" x:Uid="UpButton" Width="36" Height="32" ToolTipService.ToolTip="Up one level" Click="Up_Click" IsEnabled="False">
+                    <FontIcon Glyph="&#xE74A;" FontSize="14" />
+                </Button>
+                <ComboBox x:Name="DrivePicker" x:Uid="DrivePicker" Grid.Column="1" Height="32" PlaceholderText="Choose a drive" SelectionChanged="DrivePicker_SelectionChanged">
+                    <ComboBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel>
+                                <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
+                                <TextBlock Text="{Binding Detail}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                </ComboBox>
+                <TextBlock x:Uid="PathLabel" Grid.Column="2" Text="Path" VerticalAlignment="Center" Style="{StaticResource MutedTextStyle}" />
+                <TextBox x:Name="PathBox" x:Uid="PathBox" Grid.Column="3" Height="32" PlaceholderText="C:\ or \\server\share" KeyDown="PathBox_KeyDown" />
+                <Button x:Uid="ScanPathButton" Grid.Column="4" Content="Scan" Height="32" Click="ScanPath_Click" />
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="300" MinWidth="220" />
+                <ColumnDefinition Width="5" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Grid Padding="12,10,8,10">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock x:Uid="FolderTreeHeader" Text="Folder tree" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" />
+                    <TextBlock x:Name="TreeCountText" x:Uid="TreeCountText" Grid.Column="1" Text="No scan" Style="{StaticResource MutedTextStyle}" VerticalAlignment="Center" />
+                </Grid>
+                <TreeView x:Name="DirectoryTree" Grid.Row="1" Margin="0,8,0,0" SelectionMode="Single" SelectionChanged="DirectoryTree_SelectionChanged" DoubleTapped="DirectoryTree_DoubleTapped" Expanding="DirectoryTree_Expanding" ItemInvoked="DirectoryTree_ItemInvoked">
+                    <TreeView.ItemTemplate>
+                        <DataTemplate>
+                            <Grid MinWidth="190" ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <FontIcon Glyph="{Binding Content.Glyph}" FontSize="14" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                                <TextBlock Grid.Column="1" Text="{Binding Content.Name}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="2" Text="{Binding Content.PrimarySizeText}" FontSize="11" Style="{StaticResource MutedTextStyle}" VerticalAlignment="Center" />
+                            </Grid>
+                        </DataTemplate>
+                    </TreeView.ItemTemplate>
+                </TreeView>
+            </Grid>
+
+            <Border Grid.Column="1" Width="1" HorizontalAlignment="Center" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+            <TabView x:Name="WorkspaceTabs" Grid.Column="2" IsAddTabButtonVisible="False" Margin="4,4,8,8" SelectionChanged="WorkspaceTabs_SelectionChanged">
+                <TabViewItem x:Uid="OverviewTab" Header="Overview" IsClosable="False">
+                    <Grid Padding="8">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border Style="{StaticResource MetricCardStyle}">
+                                <StackPanel>
+                                    <TextBlock x:Uid="LogicalSizeLabel" Text="Logical size" Style="{StaticResource MutedTextStyle}" />
+                                    <TextBlock x:Name="LogicalSizeText" Text="—" FontSize="24" FontWeight="SemiBold" />
+                                </StackPanel>
+                            </Border>
+                            <Border Grid.Column="1" Style="{StaticResource MetricCardStyle}">
+                                <StackPanel>
+                                    <TextBlock x:Uid="AllocatedSizeLabel" Text="Size on disk" Style="{StaticResource MutedTextStyle}" />
+                                    <TextBlock x:Name="AllocatedSizeText" Text="—" FontSize="24" FontWeight="SemiBold" />
+                                </StackPanel>
+                            </Border>
+                            <Border Grid.Column="2" Style="{StaticResource MetricCardStyle}">
+                                <StackPanel>
+                                    <TextBlock x:Uid="FilesLabel" Text="Files" Style="{StaticResource MutedTextStyle}" />
+                                    <TextBlock x:Name="FilesText" Text="—" FontSize="24" FontWeight="SemiBold" />
+                                </StackPanel>
+                            </Border>
+                            <Border Grid.Column="3" Style="{StaticResource MetricCardStyle}">
+                                <StackPanel>
+                                    <TextBlock x:Uid="FoldersLabel" Text="Folders" Style="{StaticResource MutedTextStyle}" />
+                                    <TextBlock x:Name="FoldersText" Text="—" FontSize="24" FontWeight="SemiBold" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+
+                        <Grid Grid.Row="1" Margin="0,10,0,8" ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="170" />
+                                <ColumnDefinition Width="40" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="FilterBox" x:Uid="FilterBox" PlaceholderText="Filter by name or path" TextChanged="FilterBox_TextChanged">
+                                <TextBox.Header>Results</TextBox.Header>
+                            </TextBox>
+                            <ComboBox x:Name="SortBox" x:Uid="SortBox" Grid.Column="1" Header="Sort by" SelectionChanged="SortBox_SelectionChanged">
+                                <ComboBoxItem x:Uid="SortSize" Content="Size" IsSelected="True" />
+                                <ComboBoxItem x:Uid="SortAllocated" Content="Size on disk" />
+                                <ComboBoxItem x:Uid="SortName" Content="Name" />
+                                <ComboBoxItem x:Uid="SortModified" Content="Modified" />
+                                <ComboBoxItem x:Uid="SortFileCount" Content="File count" />
+                            </ComboBox>
+                            <Button x:Name="SortDirectionButton" Grid.Column="2" Width="36" Height="32" Content="↓" FontSize="18" VerticalAlignment="Bottom" Margin="0,0,0,1" ToolTipService.ToolTip="Descending; click to reverse" Click="SortDirectionButton_Click" />
+                            <CheckBox x:Name="RecursiveCheckBox" x:Uid="RecursiveCheckBox" Grid.Column="3" Content="Search subfolders" VerticalAlignment="Bottom" Margin="4,0,0,8" Checked="RecursiveCheckBox_Changed" Unchecked="RecursiveCheckBox_Changed" />
+                        </Grid>
+
+                        <Grid Grid.Row="2" Padding="8,4" ColumnSpacing="8" Background="{ThemeResource SubtleFillColorSecondaryBrush}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="28" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="112" />
+                                <ColumnDefinition Width="112" />
+                                <ColumnDefinition Width="155" />
+                            </Grid.ColumnDefinitions>
+                            <Button Grid.Column="1" Tag="Name" Style="{StaticResource ColumnHeaderButtonStyle}" HorizontalContentAlignment="Left" Click="SortHeader_Click">
+                                <TextBlock x:Name="NameHeaderText" x:Uid="NameHeaderText" Text="Name" />
+                            </Button>
+                            <Button Grid.Column="2" Tag="Size" Style="{StaticResource ColumnHeaderButtonStyle}" HorizontalContentAlignment="Right" Click="SortHeader_Click">
+                                <TextBlock x:Name="SizeHeaderText" x:Uid="SizeHeaderText" Text="Size ↓" />
+                            </Button>
+                            <Button Grid.Column="3" Tag="Allocated" Style="{StaticResource ColumnHeaderButtonStyle}" HorizontalContentAlignment="Right" Click="SortHeader_Click">
+                                <TextBlock x:Name="AllocatedHeaderText" x:Uid="AllocatedHeaderText" Text="On disk" />
+                            </Button>
+                            <Button Grid.Column="4" Tag="Modified" Style="{StaticResource ColumnHeaderButtonStyle}" HorizontalContentAlignment="Right" Click="SortHeader_Click">
+                                <TextBlock x:Name="ModifiedHeaderText" x:Uid="ModifiedHeaderText" Text="Modified" />
+                            </Button>
+                        </Grid>
+
+                        <ListView x:Name="ChildrenList" Grid.Row="3" SelectionMode="Single" DoubleTapped="ChildrenList_DoubleTapped" SelectionChanged="ChildrenList_SelectionChanged">
+                            <ListView.ItemContainerStyle>
+                                <Style TargetType="ListViewItem">
+                                    <Setter Property="Padding" Value="0" />
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                </Style>
+                            </ListView.ItemContainerStyle>
+                            <ListView.ContextFlyout>
+                                <MenuFlyout>
+                                    <MenuFlyoutItem x:Uid="ShowInExplorerMenu" Text="Show in File Explorer" Click="ShowInExplorer_Click" />
+                                    <MenuFlyoutItem x:Uid="CopyPathMenu" Text="Copy path" Click="CopySelectedPath_Click" />
+                                    <MenuFlyoutSeparator />
+                                    <MenuFlyoutItem x:Uid="RecycleMenu" Text="Move to Recycle Bin" Click="RecycleSelected_Click" />
+                                    <MenuFlyoutItem x:Uid="DeletePermanentlyMenu" Text="Delete permanently…" Click="DeleteSelected_Click" />
+                                </MenuFlyout>
+                            </ListView.ContextFlyout>
+                            <ListView.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Padding="8,5" ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="28" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="112" />
+                                            <ColumnDefinition Width="112" />
+                                            <ColumnDefinition Width="155" />
+                                        </Grid.ColumnDefinitions>
+                                        <FontIcon Glyph="{Binding Glyph}" FontSize="15" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                                        <StackPanel Grid.Column="1">
+                                            <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{Binding CountText}" FontSize="11" Style="{StaticResource MutedTextStyle}" />
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="2" Text="{Binding SizeText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="3" Text="{Binding AllocatedText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="4" Text="{Binding ModifiedText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                    </Grid>
+                </TabViewItem>
+
+                <TabViewItem x:Uid="TreemapTab" Header="Treemap" IsClosable="False">
+                    <Grid Padding="8">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <TextBlock x:Uid="TreemapHint" Text="Double-click a folder tile to drill in. The 250 largest visible items are drawn." Style="{StaticResource MutedTextStyle}" Margin="4,2,4,8" />
+                        <Canvas x:Name="TreemapCanvas" Grid.Row="1" MinWidth="600" MinHeight="420" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" Loaded="TreemapCanvas_Loaded" LayoutUpdated="TreemapCanvas_LayoutUpdated" SizeChanged="TreemapCanvas_SizeChanged" />
+                    </Grid>
+                </TabViewItem>
+
+                <TabViewItem x:Uid="LargestFilesTab" Header="Largest files" IsClosable="False">
+                    <Grid Padding="8">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <TextBlock x:Name="LargestHeaderText" x:Uid="LargestHeaderText" Text="The 1,000 largest files in this scan" Style="{StaticResource MutedTextStyle}" Margin="4,4,4,8" />
+                        <ListView x:Name="LargestFilesList" Grid.Row="1" SelectionMode="Single" DoubleTapped="AnyFileList_DoubleTapped">
+                            <ListView.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Padding="8,6" ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="120" />
+                                            <ColumnDefinition Width="150" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{Binding Path}" FontSize="11" Style="{StaticResource MutedTextStyle}" TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="1" Text="{Binding SizeText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="2" Text="{Binding ModifiedText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                    </Grid>
+                </TabViewItem>
+
+                <TabViewItem x:Uid="TypesAgeTab" Header="Types &amp; age" IsClosable="False">
+                    <Grid Padding="8" ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="2*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <TextBlock x:Uid="FileExtensionsHeader" Text="File extensions" FontSize="18" FontWeight="SemiBold" Margin="4,4,4,8" />
+                            <ListView x:Name="ExtensionsList" Grid.Row="1">
+                                <ListView.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Padding="8,5" ColumnSpacing="10">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="100" />
+                                                <ColumnDefinition Width="80" />
+                                                <ColumnDefinition Width="80" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding Extension}" FontWeight="SemiBold" />
+                                                <ProgressBar Value="{Binding Percentage}" Maximum="100" Height="3" Margin="0,4,0,0" />
+                                            </StackPanel>
+                                            <TextBlock Grid.Column="1" Text="{Binding SizeText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                            <TextBlock Grid.Column="2" Text="{Binding CountText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                            <TextBlock Grid.Column="3" Text="{Binding PercentageText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
+                        </Grid>
+                        <Grid Grid.Column="1">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <TextBlock x:Uid="AgeHeader" Text="Age by last change" FontSize="18" FontWeight="SemiBold" Margin="4,4,4,8" />
+                            <ListView x:Name="AgeList" Grid.Row="1">
+                                <ListView.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Padding="8,7">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
+                                                <TextBlock Text="{Binding CountText}" FontSize="11" Style="{StaticResource MutedTextStyle}" />
+                                            </StackPanel>
+                                            <TextBlock Grid.Column="1" Text="{Binding SizeText}" VerticalAlignment="Center" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
+                        </Grid>
+                    </Grid>
+                </TabViewItem>
+
+                <TabViewItem x:Uid="DuplicatesTab" Header="Duplicates" IsClosable="False">
+                    <Grid Padding="8">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="170" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <NumberBox x:Name="DuplicateMinimumBox" x:Uid="DuplicateMinimumBox" Header="Minimum size (MB)" Value="1" Minimum="0" SpinButtonPlacementMode="Compact" />
+                            <Button x:Uid="FindDuplicatesButton" Grid.Column="1" Content="Find duplicates" VerticalAlignment="Bottom" Margin="0,0,0,1" Click="FindDuplicates_Click" />
+                            <TextBlock x:Name="DuplicateSummaryText" x:Uid="DuplicateSummaryText" Grid.Column="2" Text="Scan a folder first" VerticalAlignment="Bottom" Margin="8,0,0,9" Style="{StaticResource MutedTextStyle}" />
+                            <Button x:Uid="ShowDuplicateButton" Grid.Column="3" Content="Show selected in Explorer" VerticalAlignment="Bottom" Margin="0,0,0,1" Click="ShowDuplicateInExplorer_Click" />
+                        </Grid>
+                        <InfoBar x:Uid="DuplicateInfo" Grid.Row="1" Severity="Informational" IsOpen="True" IsClosable="False" Margin="0,10,0,8" Message="DiskLoom samples candidates first, then verifies every byte with SHA-256. It never auto-selects files for deletion." />
+                        <ListView x:Name="DuplicatesList" Grid.Row="2" SelectionMode="Single" DoubleTapped="DuplicateList_DoubleTapped">
+                            <ListView.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Padding="8,6" ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="90" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="110" />
+                                            <ColumnDefinition Width="140" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding GroupText}" FontWeight="SemiBold" />
+                                        <TextBlock Grid.Column="1" Text="{Binding Path}" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="2" Text="{Binding SizeText}" HorizontalAlignment="Right" />
+                                        <TextBlock Grid.Column="3" Text="{Binding ModifiedText}" HorizontalAlignment="Right" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                    </Grid>
+                </TabViewItem>
+
+                <TabViewItem x:Uid="InsightsTab" Header="Insights" IsClosable="False">
+                    <Grid Padding="8">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <TextBlock x:Uid="InsightsHint" Text="Review-first cleanup opportunities—DiskLoom never deletes these automatically." Style="{StaticResource MutedTextStyle}" Margin="4,4,4,8" />
+                        <ListView x:Name="InsightsList" Grid.Row="1" SelectionMode="Single" DoubleTapped="InsightList_DoubleTapped">
+                            <ListView.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Style="{StaticResource MetricCardStyle}" Margin="0,0,0,8">
+                                        <Grid ColumnSpacing="12">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="36" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <FontIcon Glyph="{Binding Glyph}" FontSize="22" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                                            <StackPanel Grid.Column="1">
+                                                <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
+                                                <TextBlock Text="{Binding Description}" Style="{StaticResource MutedTextStyle}" />
+                                                <TextBlock Text="{Binding Path}" FontSize="11" Style="{StaticResource MutedTextStyle}" TextTrimming="CharacterEllipsis" />
+                                            </StackPanel>
+                                            <TextBlock Grid.Column="2" Text="{Binding PotentialText}" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                    </Grid>
+                </TabViewItem>
+
+                <TabViewItem x:Uid="ChangesTab" Header="Changes" IsClosable="False">
+                    <Grid Padding="8">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <TextBlock x:Name="ChangesHeaderText" x:Uid="ChangesHeaderText" Text="Save a snapshot, then compare it with a later scan." Style="{StaticResource MutedTextStyle}" Margin="4,4,4,8" />
+                        <ListView x:Name="ChangesList" Grid.Row="1">
+                            <ListView.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Padding="8,6" ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="90" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="105" />
+                                            <ColumnDefinition Width="105" />
+                                            <ColumnDefinition Width="105" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding Kind}" FontWeight="SemiBold" />
+                                        <TextBlock Grid.Column="1" Text="{Binding Path}" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="2" Text="{Binding OldSize}" HorizontalAlignment="Right" />
+                                        <TextBlock Grid.Column="3" Text="{Binding NewSize}" HorizontalAlignment="Right" />
+                                        <TextBlock Grid.Column="4" Text="{Binding Delta}" HorizontalAlignment="Right" FontWeight="SemiBold" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                    </Grid>
+                </TabViewItem>
+
+                <TabViewItem x:Uid="IssuesTab" Header="Issues" IsClosable="False">
+                    <Grid Padding="8">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <Grid Margin="4,4,4,8" ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="IssuesHeaderText" x:Uid="IssuesHeaderText" Text="Access errors and files that changed during scanning appear here." Style="{StaticResource MutedTextStyle}" VerticalAlignment="Center" />
+                            <Button x:Name="IssuesBackButton" Grid.Column="1" Click="IssuesBackButton_Click">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE72B;" FontSize="13" />
+                                    <TextBlock x:Uid="IssuesBackText" Text="Back to previous view" />
+                                </StackPanel>
+                                <Button.KeyboardAccelerators>
+                                    <KeyboardAccelerator Key="Left" Modifiers="Menu" />
+                                </Button.KeyboardAccelerators>
+                            </Button>
+                        </Grid>
+                        <ListView x:Name="IssuesList" Grid.Row="1">
+                            <ListView.ContextFlyout>
+                                <MenuFlyout>
+                                    <MenuFlyoutItem x:Uid="ShowIssueMenu" Text="Show in File Explorer" Click="ShowIssueInExplorer_Click" />
+                                    <MenuFlyoutItem x:Uid="CopyIssuePathMenu" Text="Copy path" Click="CopyIssuePath_Click" />
+                                </MenuFlyout>
+                            </ListView.ContextFlyout>
+                            <ListView.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Padding="8,6" ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="130" />
+                                            <ColumnDefinition Width="2*" />
+                                            <ColumnDefinition Width="3*" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding Type}" FontWeight="SemiBold" />
+                                        <TextBlock Grid.Column="1" Text="{Binding Path}" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="2" Text="{Binding Message}" TextWrapping="Wrap" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                    </Grid>
+                </TabViewItem>
+            </TabView>
+        </Grid>
+
+        <Grid Grid.Row="3" Padding="12,6" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="240" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="StatusText" x:Uid="StatusText" Text="Choose a folder or drive to begin." TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+            <ProgressBar x:Name="WorkProgress" Grid.Column="1" Margin="12,0" VerticalAlignment="Center" Visibility="Collapsed" />
+            <TextBlock x:Name="StatusDetailText" Grid.Column="2" Style="{StaticResource MutedTextStyle}" VerticalAlignment="Center" />
+        </Grid>
+
+        <InfoBar x:Name="NotificationBar" Grid.Row="2" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="16" MaxWidth="620" IsOpen="False" IsClosable="True">
+            <InfoBar.ActionButton>
+                <Button x:Name="NotificationActionButton" x:Uid="NotificationActionButton" Content="View issues" Visibility="Collapsed" Click="NotificationActionButton_Click" />
+            </InfoBar.ActionButton>
+        </InfoBar>
+    </Grid>
+</Page>
