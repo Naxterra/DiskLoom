@@ -43,7 +43,7 @@ pwsh -File tools\Build-DiskLoom.ps1 -Publish
 pwsh -File tools\Build-DiskLoomInstaller.ps1
 ```
 
-The ready-to-install MSI is written to `artifacts\DiskLoom\installer\DiskLoom-Setup-x64.msi`. The portable/self-contained build is under `artifacts\DiskLoom\win-x64`.
+The ready-to-install English and German MSIs are written to `artifacts\DiskLoom\installer\DiskLoom-Setup-x64.msi` and `DiskLoom-Setup-x64-de-DE.msi`. The portable/self-contained build is under `artifacts\DiskLoom\win-x64`.
 
 ## CLI and scheduled scans
 

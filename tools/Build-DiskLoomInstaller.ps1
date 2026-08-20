@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '0.1.9',
+    [string]$Version = '0.1.10',
     [string]$UpdateManifestUrl = '',
     [string]$PublisherCertificateSha256 = '',
     [string]$CodeSigningCertificateThumbprint = '',
@@ -45,18 +45,37 @@ try {
         Sign-File (Join-Path $publishDirectory 'DiskLoom.Cli.exe') $CodeSigningCertificateThumbprint
     }
 
+    $resolvedWorkspace = [IO.Path]::GetFullPath($workspaceRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $resolvedInstallerDirectory = [IO.Path]::GetFullPath($installerDirectory)
+    if (-not $resolvedInstallerDirectory.StartsWith($resolvedWorkspace + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to clean an installer directory outside the workspace: $resolvedInstallerDirectory"
+    }
+    if (Test-Path -LiteralPath $resolvedInstallerDirectory) {
+        Remove-Item -LiteralPath $resolvedInstallerDirectory -Recurse -Force
+    }
+
     & dotnet build $installerProject -c Release -p:DiskLoomVersion=$Version
     if ($LASTEXITCODE -ne 0) { throw 'DiskLoom MSI build failed.' }
 
-    $msi = Get-ChildItem -LiteralPath $installerDirectory -Recurse -Filter 'DiskLoom-Setup-x64.msi' |
-        Sort-Object LastWriteTimeUtc -Descending |
+    $englishMsi = Get-ChildItem -LiteralPath (Join-Path $installerDirectory 'en-US') -Filter 'DiskLoom-Setup-x64.msi' |
         Select-Object -First 1
-    if ($null -eq $msi) { throw "Installer output was not found under $installerDirectory." }
+    $germanMsi = Get-ChildItem -LiteralPath (Join-Path $installerDirectory 'de-DE') -Filter 'DiskLoom-Setup-x64.msi' |
+        Select-Object -First 1
+    if ($null -eq $englishMsi -or $null -eq $germanMsi) {
+        throw "English and German installer outputs were not both found under $installerDirectory."
+    }
+
+    $englishOutput = Join-Path $installerDirectory 'DiskLoom-Setup-x64.msi'
+    $germanOutput = Join-Path $installerDirectory 'DiskLoom-Setup-x64-de-DE.msi'
+    Copy-Item -LiteralPath $englishMsi.FullName -Destination $englishOutput -Force
+    Copy-Item -LiteralPath $germanMsi.FullName -Destination $germanOutput -Force
 
     if (-not [string]::IsNullOrWhiteSpace($CodeSigningCertificateThumbprint)) {
-        Sign-File $msi.FullName $CodeSigningCertificateThumbprint
+        Sign-File $englishOutput $CodeSigningCertificateThumbprint
+        Sign-File $germanOutput $CodeSigningCertificateThumbprint
     }
-    Write-Host "Built DiskLoom installer: $($msi.FullName)"
+    Write-Host "Built English DiskLoom installer: $englishOutput"
+    Write-Host "Built German DiskLoom installer: $germanOutput"
 } finally {
     Pop-Location
 }
