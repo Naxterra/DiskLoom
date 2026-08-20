@@ -3,10 +3,10 @@
     <OutputType>Package</OutputType>
     <Platform>x64</Platform>
     <InstallerPlatform>x64</InstallerPlatform>
-    <Cultures>en-US</Cultures>
+    <Cultures>en-US;de-DE</Cultures>
     <OutputName>DiskLoom-Setup-x64</OutputName>
     <OutputPath>$(MSBuildProjectDirectory)\..\..\artifacts\DiskLoom\installer\</OutputPath>
-    <DiskLoomVersion Condition="'$(DiskLoomVersion)' == ''">0.1.9</DiskLoomVersion>
+    <DiskLoomVersion Condition="'$(DiskLoomVersion)' == ''">0.1.10</DiskLoomVersion>
     <DefineConstants>ProductVersion=$(DiskLoomVersion)</DefineConstants>
     <DefaultCompressionLevel>high</DefaultCompressionLevel>
     <SuppressIces>ICE03</SuppressIces>

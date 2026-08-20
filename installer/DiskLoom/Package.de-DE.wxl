@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization
+    xmlns="http://wixtoolset.org/schemas/v4/wxl"
+    Culture="de-DE"
+    Codepage="Windows-1252"
+    SummaryInformationCodepage="Windows-1252">
+  <String Id="ProductLanguage" Value="1031" />
+  <String Id="DowngradeError" Value="Eine neuere Version von DiskLoom ist bereits installiert." />
+  <String Id="MainFeatureTitle" Value="DiskLoom-Anwendung" />
+  <String Id="MainFeatureDescription" Value="Erforderliche Anwendungsdateien und Explorer-Integration." />
+  <String Id="StartMenuFeatureTitle" Value="Startmenü-Verknüpfung" />
+  <String Id="StartMenuFeatureDescription" Value="DiskLoom zum Startmenü für alle Benutzer hinzufügen." />
+  <String Id="DesktopFeatureTitle" Value="Desktopverknüpfung" />
+  <String Id="DesktopFeatureDescription" Value="Eine DiskLoom-Verknüpfung auf dem Desktop für alle Benutzer hinzufügen." />
+  <String Id="ShortcutDescription" Value="Windows-Speicheranalyse" />
+  <String Id="ShellScan" Value="Mit DiskLoom scannen" />
+  <String Id="ShellScanFolder" Value="Diesen Ordner mit DiskLoom scannen" />
+  <String Id="ArpComments" Value="Schnelle, private Speicherplatzanalyse für Windows 11." />
+  <String Id="ExitDialogText" Value="DiskLoom wurde installiert. Die auf der Anpassungsseite ausgewählten Verknüpfungen sind jetzt verfügbar." />
+</WixLocalization>
