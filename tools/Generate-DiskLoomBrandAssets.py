@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
@@ -49,9 +50,9 @@ def make_lockup(mark: Image.Image, foreground: tuple[int, int, int, int], destin
 def make_installer_art(mark: Image.Image) -> None:
     banner = Image.new("RGB", (493, 58), (244, 249, 255))
     banner_icon = mark.resize((52, 52), Image.Resampling.LANCZOS)
-    banner.paste(banner_icon, (6, 3), banner_icon)
-    banner_draw = ImageDraw.Draw(banner)
-    banner_draw.text((64, 9), "DiskLoom", font=font(30), fill=(20, 43, 70))
+    # WixUI draws the page title and subtitle over the left side of this image.
+    # Keep that text-safe area empty and place branding at the far right.
+    banner.paste(banner_icon, (435, 3), banner_icon)
     banner.save(ASSETS / "InstallerBanner.png", optimize=True)
 
     dialog = Image.new("RGB", (493, 312), (246, 250, 255))
@@ -64,14 +65,28 @@ def make_installer_art(mark: Image.Image) -> None:
             255,
         )
         dialog_draw.line((0, y, dialog.width, y), fill=color)
-    dialog_icon = mark.resize((152, 152), Image.Resampling.LANCZOS)
-    dialog.paste(dialog_icon, (8, 72), dialog_icon)
+    # Standard WixUI dialogs reserve the left strip for artwork and put their
+    # controls to its right. Keep the mark wholly inside that strip.
+    dialog_icon = mark.resize((112, 112), Image.Resampling.LANCZOS)
+    dialog.paste(dialog_icon, (14, 100), dialog_icon)
     dialog.save(ASSETS / "InstallerDialog.png", optimize=True)
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate DiskLoom brand assets.")
+    parser.add_argument(
+        "--installer-only",
+        action="store_true",
+        help="Regenerate only the WixUI banner and dialog artwork.",
+    )
+    args = parser.parse_args()
+
     ASSETS.mkdir(parents=True, exist_ok=True)
     mark = alpha_fitted_square(Image.open(MASTER))
+    if args.installer_only:
+        make_installer_art(mark)
+        return
+
     mark.save(ASSETS / "DiskLoom-Mark.png", optimize=True)
 
     for size in (16, 24, 32, 48, 64, 128, 256, 512):

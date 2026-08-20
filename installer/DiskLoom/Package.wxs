@@ -8,14 +8,30 @@
       Version="$(ProductVersion)"
       UpgradeCode="{5B7A6F64-E796-4D90-B4E3-4F10967E22C5}"
       Scope="perMachine"
-      Language="1033"
+      Language="!(loc.ProductLanguage)"
       InstallerVersion="500"
       Compressed="yes">
 
     <MajorUpgrade
-        DowngradeErrorMessage="A newer version of DiskLoom is already installed."
+        DowngradeErrorMessage="!(loc.DowngradeError)"
+        IgnoreLanguage="yes"
         Schedule="afterInstallInitialize" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Property Id="DISKLOOM_SHELL_SCAN" Value="!(loc.ShellScan)" />
+    <Property Id="DISKLOOM_SHELL_SCAN_FOLDER" Value="!(loc.ShellScanFolder)" />
+    <SetProperty
+        Id="DISKLOOM_SHELL_SCAN"
+        Value="Mit DiskLoom scannen"
+        Before="CostFinalize"
+        Sequence="both"
+        Condition="UserLanguageID = 1031 OR UserLanguageID = 2055 OR UserLanguageID = 3079 OR UserLanguageID = 4103 OR UserLanguageID = 5127" />
+    <SetProperty
+        Id="DISKLOOM_SHELL_SCAN_FOLDER"
+        Value="Diesen Ordner mit DiskLoom scannen"
+        Before="CostFinalize"
+        Sequence="both"
+        Condition="UserLanguageID = 1031 OR UserLanguageID = 2055 OR UserLanguageID = 3079 OR UserLanguageID = 4103 OR UserLanguageID = 5127" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
       <Directory Id="INSTALLFOLDER" Name="DiskLoom" />
@@ -25,47 +41,47 @@
     </StandardDirectory>
     <StandardDirectory Id="DesktopFolder" />
 
-    <Feature Id="MainFeature" Title="DiskLoom application" Description="Required application files and Explorer integration." Level="1" AllowAbsent="no" AllowAdvertise="no" InstallDefault="local" Display="expand">
+    <Feature Id="MainFeature" Title="!(loc.MainFeatureTitle)" Description="!(loc.MainFeatureDescription)" Level="1" AllowAbsent="no" AllowAdvertise="no" InstallDefault="local" Display="expand">
       <Component Id="MainExecutable" Directory="INSTALLFOLDER" Guid="{B2C6B468-F975-47AC-89EE-D8CC670A74DC}">
         <File Id="DiskLoomExe" Source="!(bindpath.Publish)\DiskLoom.exe" KeyPath="yes" />
       </Component>
 
-      <Feature Id="StartMenuShortcutFeature" Title="Start menu shortcut" Description="Add DiskLoom to the all-users Start menu." Level="1" AllowAbsent="yes" AllowAdvertise="no" InstallDefault="local" TypicalDefault="install">
+      <Feature Id="StartMenuShortcutFeature" Title="!(loc.StartMenuFeatureTitle)" Description="!(loc.StartMenuFeatureDescription)" Level="1" AllowAbsent="yes" AllowAdvertise="no" InstallDefault="local" TypicalDefault="install">
         <Component Id="DiskLoomStartMenuShortcutComponent" Directory="ProgramMenuDir" Guid="{C336DA15-734C-40D1-A5E8-548F03A1865B}">
           <Shortcut
               Id="DiskLoomStartMenuShortcut"
               Name="DiskLoom"
-              Description="Windows storage analyzer"
+              Description="!(loc.ShortcutDescription)"
               Target="[INSTALLFOLDER]DiskLoom.exe"
               WorkingDirectory="INSTALLFOLDER"
-              Icon="DiskLoomProductIcon.exe" />
+              Icon="DiskLoomProductIcon.ico" />
           <RemoveFolder Id="RemoveDiskLoomProgramMenu" Directory="ProgramMenuDir" On="uninstall" />
           <RegistryValue Root="HKCU" Key="Software\Naxterra\DiskLoom\Installer" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
         </Component>
       </Feature>
 
-      <Feature Id="DesktopShortcutFeature" Title="Desktop shortcut" Description="Add a DiskLoom shortcut to the all-users desktop." Level="1" AllowAbsent="yes" AllowAdvertise="no" InstallDefault="local" TypicalDefault="install">
+      <Feature Id="DesktopShortcutFeature" Title="!(loc.DesktopFeatureTitle)" Description="!(loc.DesktopFeatureDescription)" Level="1" AllowAbsent="yes" AllowAdvertise="no" InstallDefault="local" TypicalDefault="install">
         <Component Id="DiskLoomDesktopShortcutComponent" Directory="DesktopFolder" Guid="{7D9C4D63-E625-4D58-9D78-1ED65D568BCC}">
           <Shortcut
               Id="DiskLoomDesktopShortcut"
               Name="DiskLoom"
-              Description="Windows storage analyzer"
+              Description="!(loc.ShortcutDescription)"
               Target="[INSTALLFOLDER]DiskLoom.exe"
               WorkingDirectory="INSTALLFOLDER"
-              Icon="DiskLoomProductIcon.exe" />
+              Icon="DiskLoomProductIcon.ico" />
           <RegistryValue Root="HKCU" Key="Software\Naxterra\DiskLoom\Installer" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
         </Component>
       </Feature>
 
       <Component Id="ShellIntegration" Directory="INSTALLFOLDER" Guid="{144E67B2-5703-476A-91DE-54D7E5733CB6}">
-        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\DiskLoom" Value="Scan with DiskLoom" Type="string" KeyPath="yes" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\DiskLoom" Name="Icon" Value="[INSTALLFOLDER]DiskLoom.exe" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\DiskLoom" Value="[DISKLOOM_SHELL_SCAN]" Type="string" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\DiskLoom" Name="Icon" Value="[INSTALLFOLDER]Assets\AppIcon.ico,0" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\DiskLoom\command" Value="&quot;[INSTALLFOLDER]DiskLoom.exe&quot; --scan &quot;%V&quot;" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\DiskLoom" Value="Scan this folder with DiskLoom" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\DiskLoom" Name="Icon" Value="[INSTALLFOLDER]DiskLoom.exe" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\DiskLoom" Value="[DISKLOOM_SHELL_SCAN_FOLDER]" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\DiskLoom" Name="Icon" Value="[INSTALLFOLDER]Assets\AppIcon.ico,0" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\DiskLoom\command" Value="&quot;[INSTALLFOLDER]DiskLoom.exe&quot; --scan &quot;%V&quot;" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Drive\shell\DiskLoom" Value="Scan with DiskLoom" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Drive\shell\DiskLoom" Name="Icon" Value="[INSTALLFOLDER]DiskLoom.exe" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Drive\shell\DiskLoom" Value="[DISKLOOM_SHELL_SCAN]" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Drive\shell\DiskLoom" Name="Icon" Value="[INSTALLFOLDER]Assets\AppIcon.ico,0" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\Drive\shell\DiskLoom\command" Value="&quot;[INSTALLFOLDER]DiskLoom.exe&quot; --scan &quot;%V&quot;" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\DiskLoom.exe" Value="[INSTALLFOLDER]DiskLoom.exe" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\DiskLoom.exe" Name="Path" Value="[INSTALLFOLDER]" Type="string" />
@@ -77,12 +93,12 @@
       </Files>
     </Feature>
 
-    <Icon Id="DiskLoomProductIcon.exe" SourceFile="!(bindpath.Publish)\DiskLoom.exe" />
-    <Property Id="ARPPRODUCTICON" Value="DiskLoomProductIcon.exe" />
-    <Property Id="ARPCOMMENTS" Value="Fast, private disk-space analysis for Windows 11." />
+    <Icon Id="DiskLoomProductIcon.ico" SourceFile="!(bindpath.Publish)\Assets\AppIcon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="DiskLoomProductIcon.ico" />
+    <Property Id="ARPCOMMENTS" Value="!(loc.ArpComments)" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/Naxterra/DiskLoom" />
     <Property Id="ARPHELPLINK" Value="https://github.com/Naxterra/DiskLoom/issues" />
-    <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT" Value="DiskLoom is installed. The shortcuts selected on the customization page are now available." />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT" Value="!(loc.ExitDialogText)" />
 
     <WixVariable Id="WixUILicenseRtf" Value="$(sys.SOURCEFILEDIR)License.rtf" />
     <WixVariable Id="WixUIBannerBmp" Value="$(sys.SOURCEFILEDIR)..\..\src\DiskLoom\Assets\InstallerBanner.png" />

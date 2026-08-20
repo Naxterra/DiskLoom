@@ -12,7 +12,7 @@ DiskLoom is a clean-room Windows 11 storage analyzer built with C#, .NET 11, Win
 
 ## Install
 
-Download the x64 MSI or portable ZIP from [GitHub Releases](https://github.com/Naxterra/DiskLoom/releases/latest). The MSI offers optional Start-menu and Desktop shortcuts and Windows Explorer folder/drive integration.
+Download the x64 MSI or portable ZIP from [GitHub Releases](https://github.com/Naxterra/DiskLoom/releases/latest). Releases include English and fully localized German MSI variants. Both offer optional Start-menu and Desktop shortcuts and Windows Explorer folder/drive integration.
 
 The reusable scanning engine is published as `Naxterra.DiskLoom.Core` under [GitHub Packages](https://github.com/Naxterra/DiskLoom/packages).
 
