@@ -32,9 +32,13 @@
         Before="CostFinalize"
         Sequence="both"
         Condition="UserLanguageID = 1031 OR UserLanguageID = 2055 OR UserLanguageID = 3079 OR UserLanguageID = 4103 OR UserLanguageID = 5127" />
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[APPLICATIONFOLDER]" After="CostFinalize" Sequence="execute" />
+
+    <Property Id="ApplicationFolderName" Value="DiskLoom" />
+    <Property Id="WixAppFolder" Value="WixPerMachineFolder" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
-      <Directory Id="INSTALLFOLDER" Name="DiskLoom" />
+      <Directory Id="APPLICATIONFOLDER" Name="DiskLoom" />
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="ProgramMenuDir" Name="DiskLoom" />
@@ -42,7 +46,7 @@
     <StandardDirectory Id="DesktopFolder" />
 
     <Feature Id="MainFeature" Title="!(loc.MainFeatureTitle)" Description="!(loc.MainFeatureDescription)" Level="1" AllowAbsent="no" AllowAdvertise="no" InstallDefault="local" Display="expand">
-      <Component Id="MainExecutable" Directory="INSTALLFOLDER" Guid="{B2C6B468-F975-47AC-89EE-D8CC670A74DC}">
+      <Component Id="MainExecutable" Directory="APPLICATIONFOLDER" Guid="{B2C6B468-F975-47AC-89EE-D8CC670A74DC}">
         <File Id="DiskLoomExe" Source="!(bindpath.Publish)\DiskLoom.exe" KeyPath="yes" />
       </Component>
 
@@ -52,8 +56,8 @@
               Id="DiskLoomStartMenuShortcut"
               Name="DiskLoom"
               Description="!(loc.ShortcutDescription)"
-              Target="[INSTALLFOLDER]DiskLoom.exe"
-              WorkingDirectory="INSTALLFOLDER"
+              Target="[APPLICATIONFOLDER]DiskLoom.exe"
+              WorkingDirectory="APPLICATIONFOLDER"
               Icon="DiskLoomProductIcon.ico" />
           <RemoveFolder Id="RemoveDiskLoomProgramMenu" Directory="ProgramMenuDir" On="uninstall" />
           <RegistryValue Root="HKCU" Key="Software\Naxterra\DiskLoom\Installer" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
@@ -66,28 +70,28 @@
               Id="DiskLoomDesktopShortcut"
               Name="DiskLoom"
               Description="!(loc.ShortcutDescription)"
-              Target="[INSTALLFOLDER]DiskLoom.exe"
-              WorkingDirectory="INSTALLFOLDER"
+              Target="[APPLICATIONFOLDER]DiskLoom.exe"
+              WorkingDirectory="APPLICATIONFOLDER"
               Icon="DiskLoomProductIcon.ico" />
           <RegistryValue Root="HKCU" Key="Software\Naxterra\DiskLoom\Installer" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
         </Component>
       </Feature>
 
-      <Component Id="ShellIntegration" Directory="INSTALLFOLDER" Guid="{144E67B2-5703-476A-91DE-54D7E5733CB6}">
+      <Component Id="ShellIntegration" Directory="APPLICATIONFOLDER" Guid="{144E67B2-5703-476A-91DE-54D7E5733CB6}">
         <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\DiskLoom" Value="[DISKLOOM_SHELL_SCAN]" Type="string" KeyPath="yes" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\DiskLoom" Name="Icon" Value="[INSTALLFOLDER]Assets\AppIcon.ico,0" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\DiskLoom\command" Value="&quot;[INSTALLFOLDER]DiskLoom.exe&quot; --scan &quot;%V&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\DiskLoom" Name="Icon" Value="[APPLICATIONFOLDER]Assets\AppIcon.ico,0" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\DiskLoom\command" Value="&quot;[APPLICATIONFOLDER]DiskLoom.exe&quot; --scan &quot;%V&quot;" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\DiskLoom" Value="[DISKLOOM_SHELL_SCAN_FOLDER]" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\DiskLoom" Name="Icon" Value="[INSTALLFOLDER]Assets\AppIcon.ico,0" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\DiskLoom\command" Value="&quot;[INSTALLFOLDER]DiskLoom.exe&quot; --scan &quot;%V&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\DiskLoom" Name="Icon" Value="[APPLICATIONFOLDER]Assets\AppIcon.ico,0" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\DiskLoom\command" Value="&quot;[APPLICATIONFOLDER]DiskLoom.exe&quot; --scan &quot;%V&quot;" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\Drive\shell\DiskLoom" Value="[DISKLOOM_SHELL_SCAN]" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Drive\shell\DiskLoom" Name="Icon" Value="[INSTALLFOLDER]Assets\AppIcon.ico,0" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Drive\shell\DiskLoom\command" Value="&quot;[INSTALLFOLDER]DiskLoom.exe&quot; --scan &quot;%V&quot;" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\DiskLoom.exe" Value="[INSTALLFOLDER]DiskLoom.exe" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\DiskLoom.exe" Name="Path" Value="[INSTALLFOLDER]" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Drive\shell\DiskLoom" Name="Icon" Value="[APPLICATIONFOLDER]Assets\AppIcon.ico,0" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Drive\shell\DiskLoom\command" Value="&quot;[APPLICATIONFOLDER]DiskLoom.exe&quot; --scan &quot;%V&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\DiskLoom.exe" Value="[APPLICATIONFOLDER]DiskLoom.exe" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\DiskLoom.exe" Name="Path" Value="[APPLICATIONFOLDER]" Type="string" />
       </Component>
 
-      <Files Directory="INSTALLFOLDER" Include="!(bindpath.Publish)\**">
+      <Files Directory="APPLICATIONFOLDER" Include="!(bindpath.Publish)\**">
         <Exclude Files="!(bindpath.Publish)\DiskLoom.exe" />
         <Exclude Files="!(bindpath.Publish)\**\*.pdb" />
       </Files>
@@ -103,7 +107,8 @@
     <WixVariable Id="WixUILicenseRtf" Value="$(sys.SOURCEFILEDIR)License.rtf" />
     <WixVariable Id="WixUIBannerBmp" Value="$(sys.SOURCEFILEDIR)..\..\src\DiskLoom\Assets\InstallerBanner.png" />
     <WixVariable Id="WixUIDialogBmp" Value="$(sys.SOURCEFILEDIR)..\..\src\DiskLoom\Assets\InstallerDialog.png" />
-    <ui:WixUI Id="WixUI_FeatureTree" InstallDirectory="INSTALLFOLDER" />
+    <WixVariable Id="override WixUISupportPerUser" Value="0" />
+    <ui:WixUI Id="WixUI_Advanced" ExtendedPathValidation="yes" />
     <UIRef Id="WixUI_ErrorProgressText" />
   </Package>
 </Wix>

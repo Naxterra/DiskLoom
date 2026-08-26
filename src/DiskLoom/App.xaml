@@ -9,12 +9,85 @@
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
             </ResourceDictionary.MergedDictionaries>
 
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Default">
+                    <SolidColorBrush x:Key="DiskLoomPageBrush" Color="#E6111723" />
+                    <SolidColorBrush x:Key="DiskLoomTreePaneBrush" Color="#E6122130" />
+                    <SolidColorBrush x:Key="DiskLoomNavigationButtonBrush" Color="#B51C3048" />
+                    <SolidColorBrush x:Key="DiskLoomNavigationBorderBrush" Color="#5C35A7FF" />
+                    <SolidColorBrush x:Key="DiskLoomSplitterTrackBrush" Color="#4935A7FF" />
+                    <SolidColorBrush x:Key="DiskLoomResultHeaderBrush" Color="#D91B2B42" />
+                    <SolidColorBrush x:Key="DiskLoomStatusBrush" Color="#E6162436" />
+                    <SolidColorBrush x:Key="DiskLoomBlueBrush" Color="#54A8FF" />
+                    <SolidColorBrush x:Key="DiskLoomCyanBrush" Color="#35D3F4" />
+                    <SolidColorBrush x:Key="DiskLoomTealBrush" Color="#2DE0B0" />
+                    <SolidColorBrush x:Key="DiskLoomVioletBrush" Color="#B38CFF" />
+                    <SolidColorBrush x:Key="DiskLoomAmberBrush" Color="#FFC263" />
+                    <SolidColorBrush x:Key="DiskLoomMetricTextBrush" Color="#FFF7FB" />
+                    <SolidColorBrush x:Key="DiskLoomLogicalCardBrush" Color="#D9163152" />
+                    <SolidColorBrush x:Key="DiskLoomAllocatedCardBrush" Color="#D9123542" />
+                    <SolidColorBrush x:Key="DiskLoomFilesCardBrush" Color="#D92B2149" />
+                    <SolidColorBrush x:Key="DiskLoomFoldersCardBrush" Color="#D9163B35" />
+                    <LinearGradientBrush x:Key="DiskLoomCommandBarBrush" StartPoint="0,0" EndPoint="1,0">
+                        <GradientStop Color="#E51A2D47" Offset="0" />
+                        <GradientStop Color="#E5143A45" Offset="0.55" />
+                        <GradientStop Color="#E52C2448" Offset="1" />
+                    </LinearGradientBrush>
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Light">
+                    <SolidColorBrush x:Key="DiskLoomPageBrush" Color="#F2F7FD" />
+                    <SolidColorBrush x:Key="DiskLoomTreePaneBrush" Color="#EAF4FF" />
+                    <SolidColorBrush x:Key="DiskLoomNavigationButtonBrush" Color="#F5FAFF" />
+                    <SolidColorBrush x:Key="DiskLoomNavigationBorderBrush" Color="#7DBEFF" />
+                    <SolidColorBrush x:Key="DiskLoomSplitterTrackBrush" Color="#704A9DE8" />
+                    <SolidColorBrush x:Key="DiskLoomResultHeaderBrush" Color="#DDEBFA" />
+                    <SolidColorBrush x:Key="DiskLoomStatusBrush" Color="#E7F1FC" />
+                    <SolidColorBrush x:Key="DiskLoomBlueBrush" Color="#1268C4" />
+                    <SolidColorBrush x:Key="DiskLoomCyanBrush" Color="#007E9A" />
+                    <SolidColorBrush x:Key="DiskLoomTealBrush" Color="#007B62" />
+                    <SolidColorBrush x:Key="DiskLoomVioletBrush" Color="#6C3DC1" />
+                    <SolidColorBrush x:Key="DiskLoomAmberBrush" Color="#9A5A00" />
+                    <SolidColorBrush x:Key="DiskLoomMetricTextBrush" Color="#10233E" />
+                    <SolidColorBrush x:Key="DiskLoomLogicalCardBrush" Color="#E4F0FF" />
+                    <SolidColorBrush x:Key="DiskLoomAllocatedCardBrush" Color="#DCF8FC" />
+                    <SolidColorBrush x:Key="DiskLoomFilesCardBrush" Color="#EEE6FF" />
+                    <SolidColorBrush x:Key="DiskLoomFoldersCardBrush" Color="#DDF8EE" />
+                    <LinearGradientBrush x:Key="DiskLoomCommandBarBrush" StartPoint="0,0" EndPoint="1,0">
+                        <GradientStop Color="#DCEBFF" Offset="0" />
+                        <GradientStop Color="#DCF8F1" Offset="0.55" />
+                        <GradientStop Color="#EEE5FF" Offset="1" />
+                    </LinearGradientBrush>
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
+
             <Style x:Key="MetricCardStyle" TargetType="Border">
-                <Setter Property="Padding" Value="16,12" />
+                <Setter Property="Padding" Value="12,8" />
                 <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
                 <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
                 <Setter Property="BorderThickness" Value="1" />
                 <Setter Property="CornerRadius" Value="8" />
+            </Style>
+            <Style x:Key="LogicalMetricCardStyle" TargetType="Border" BasedOn="{StaticResource MetricCardStyle}">
+                <Setter Property="Background" Value="{ThemeResource DiskLoomLogicalCardBrush}" />
+                <Setter Property="BorderBrush" Value="{ThemeResource DiskLoomBlueBrush}" />
+            </Style>
+            <Style x:Key="AllocatedMetricCardStyle" TargetType="Border" BasedOn="{StaticResource MetricCardStyle}">
+                <Setter Property="Background" Value="{ThemeResource DiskLoomAllocatedCardBrush}" />
+                <Setter Property="BorderBrush" Value="{ThemeResource DiskLoomCyanBrush}" />
+            </Style>
+            <Style x:Key="FilesMetricCardStyle" TargetType="Border" BasedOn="{StaticResource MetricCardStyle}">
+                <Setter Property="Background" Value="{ThemeResource DiskLoomFilesCardBrush}" />
+                <Setter Property="BorderBrush" Value="{ThemeResource DiskLoomVioletBrush}" />
+            </Style>
+            <Style x:Key="FoldersMetricCardStyle" TargetType="Border" BasedOn="{StaticResource MetricCardStyle}">
+                <Setter Property="Background" Value="{ThemeResource DiskLoomFoldersCardBrush}" />
+                <Setter Property="BorderBrush" Value="{ThemeResource DiskLoomTealBrush}" />
+            </Style>
+            <Style x:Key="NavigationButtonStyle" TargetType="Button">
+                <Setter Property="Background" Value="{ThemeResource DiskLoomNavigationButtonBrush}" />
+                <Setter Property="BorderBrush" Value="{ThemeResource DiskLoomNavigationBorderBrush}" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Setter Property="CornerRadius" Value="6" />
             </Style>
             <Style x:Key="MutedTextStyle" TargetType="TextBlock">
                 <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
@@ -22,7 +95,7 @@
             <Style x:Key="ColumnHeaderStyle" TargetType="TextBlock">
                 <Setter Property="FontSize" Value="12" />
                 <Setter Property="FontWeight" Value="SemiBold" />
-                <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+                <Setter Property="Foreground" Value="{ThemeResource DiskLoomCyanBrush}" />
                 <Setter Property="VerticalAlignment" Value="Center" />
             </Style>
             <Style x:Key="ColumnHeaderButtonStyle" TargetType="Button">
@@ -33,9 +106,22 @@
                 <Setter Property="BorderThickness" Value="0" />
                 <Setter Property="CornerRadius" Value="0" />
                 <Setter Property="HorizontalAlignment" Value="Stretch" />
-                <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+                <Setter Property="Foreground" Value="{ThemeResource DiskLoomCyanBrush}" />
                 <Setter Property="FontSize" Value="12" />
                 <Setter Property="FontWeight" Value="SemiBold" />
+            </Style>
+            <Style x:Key="ResultColumnSplitterStyle" TargetType="Thumb">
+                <Setter Property="Width" Value="6" />
+                <Setter Property="Background" Value="Transparent" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="Thumb">
+                            <Grid Background="Transparent">
+                                <Border Width="1" HorizontalAlignment="Center" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+                            </Grid>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
             </Style>
         </ResourceDictionary>
     </Application.Resources>

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.11 — 2026-08-26
+
+- Added Back, Forward, and Up folder navigation with clickable path breadcrumbs and direct path editing.
+- Synchronized the folder tree with every navigation source: results, tree, treemap, history, Up, and breadcrumbs now expand, select, and reveal the active folder.
+- Added a wider, resizable folder pane and reduced card, toolbar, header, and row spacing for a denser wide-screen layout.
+- Anchored targeted scans at the drive or share root in the folder tree and breadcrumbs, preserving the full navigation path above the scanned folder.
+- Added Excel-style result columns: drag dividers to resize and double-click a divider to fit that column to its contents.
+- Rebalanced the default table so Name no longer consumes most of a wide window.
+- Enforced a single running app instance while redirecting Explorer scan requests to the existing window.
+- Localized navigation, resizing hints, and missing-path errors, and clear stale notifications when a new scan begins.
+- Added an explicit installer destination-folder page with a visible path, working Browse dialog, optional shortcut page, and Apps & Features install-location metadata.
+- Replaced the flat gray UI with a logo-derived blue, cyan, teal, and violet palette in both light and dark modes.
+- Made the folder-pane resize rail full-height with a visible grip and horizontal-resize cursor while retaining double-click reset.
+
 ## 0.1.10 — 2026-08-20
 
 - Fixed Start-menu, Desktop, Apps & Features, and Explorer context-menu icons by using the dedicated multi-resolution DiskLoom ICO instead of an executable-derived installer icon.

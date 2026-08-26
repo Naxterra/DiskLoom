@@ -24,4 +24,18 @@ public sealed partial class MainWindow : Window
     {
         AppWindow.TitleBar.ButtonForegroundColor = WindowRoot.ActualTheme == ElementTheme.Dark ? Colors.White : Colors.Black;
     }
+
+    internal void HandleRedirectedActivation(string? scanPath)
+    {
+        if (AppWindow.Presenter is OverlappedPresenter presenter)
+        {
+            presenter.Restore();
+        }
+        Activate();
+
+        if (!string.IsNullOrWhiteSpace(scanPath) && RootFrame.Content is MainPage page)
+        {
+            _ = page.StartExternalScanAsync(scanPath);
+        }
+    }
 }
