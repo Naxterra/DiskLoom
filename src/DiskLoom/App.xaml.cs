@@ -1,10 +1,17 @@
 using Microsoft.UI.Xaml;
 using System.Globalization;
+using System.Runtime.InteropServices;
+using Microsoft.UI.Dispatching;
+using Microsoft.Windows.AppLifecycle;
+using Windows.ApplicationModel.Activation;
 
 namespace DiskLoom;
 
 public partial class App : Application
 {
+    private readonly Queue<AppActivationArguments> _redirectedActivations = [];
+    private readonly object _activationLock = new();
+    private DispatcherQueue? _dispatcherQueue;
     public static Window Window { get; private set; } = null!;
     public static nint WindowHandle => WinRT.Interop.WindowNative.GetWindowHandle(Window);
     public static string? StartupScanPath { get; private set; }
@@ -12,6 +19,7 @@ public partial class App : Application
 
     public App()
     {
+        Program.RedirectedActivation += Program_RedirectedActivation;
         CurrentLanguage = LoadLanguage();
         Microsoft.Windows.Globalization.ApplicationLanguages.PrimaryLanguageOverride = CurrentLanguage;
         var uiCulture = CultureInfo.GetCultureInfo(CurrentLanguage);
@@ -32,12 +40,14 @@ public partial class App : Application
         StartupScanPath = ParseScanPath(Environment.GetCommandLineArgs());
     }
 
-    protected override void OnLaunched(LaunchActivatedEventArgs args)
+    protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
         try
         {
             Window = new MainWindow();
+            _dispatcherQueue = Window.DispatcherQueue;
             Window.Activate();
+            ProcessRedirectedActivations();
         }
         catch (Exception exception)
         {
@@ -46,9 +56,48 @@ public partial class App : Application
         }
     }
 
+    private void Program_RedirectedActivation(object? sender, AppActivationArguments args)
+    {
+        lock (_activationLock)
+        {
+            _redirectedActivations.Enqueue(args);
+        }
+        _dispatcherQueue?.TryEnqueue(ProcessRedirectedActivations);
+    }
+
+    private void ProcessRedirectedActivations()
+    {
+        while (true)
+        {
+            AppActivationArguments activation;
+            lock (_activationLock)
+            {
+                if (!_redirectedActivations.TryDequeue(out activation!))
+                {
+                    return;
+                }
+            }
+
+            if (Window is MainWindow window)
+            {
+                window.HandleRedirectedActivation(ParseScanPath(activation));
+            }
+        }
+    }
+
+    private static string? ParseScanPath(AppActivationArguments activation)
+    {
+        if (activation.Data is not ILaunchActivatedEventArgs launch || string.IsNullOrWhiteSpace(launch.Arguments))
+        {
+            return null;
+        }
+
+        return ParseScanPath(SplitCommandLine(launch.Arguments));
+    }
+
     private static string? ParseScanPath(IReadOnlyList<string> arguments)
     {
-        for (var index = 1; index < arguments.Count - 1; index++)
+        for (var index = 0; index < arguments.Count - 1; index++)
         {
             if (arguments[index].Equals("--scan", StringComparison.OrdinalIgnoreCase))
             {
@@ -56,6 +105,30 @@ public partial class App : Application
             }
         }
         return null;
+    }
+
+    private static IReadOnlyList<string> SplitCommandLine(string commandLine)
+    {
+        var argumentPointer = CommandLineToArgvW(commandLine, out var argumentCount);
+        if (argumentPointer == nint.Zero)
+        {
+            return [];
+        }
+
+        try
+        {
+            var arguments = new string[argumentCount];
+            for (var index = 0; index < argumentCount; index++)
+            {
+                var valuePointer = Marshal.ReadIntPtr(argumentPointer, index * nint.Size);
+                arguments[index] = Marshal.PtrToStringUni(valuePointer) ?? string.Empty;
+            }
+            return arguments;
+        }
+        finally
+        {
+            LocalFree(argumentPointer);
+        }
     }
 
     public static void RestartWithLanguage(string language, string? scanPath = null)
@@ -84,8 +157,17 @@ public partial class App : Application
             startInfo.ArgumentList.Add("--scan");
             startInfo.ArgumentList.Add(scanPath);
         }
-        System.Diagnostics.Process.Start(startInfo);
-        Window.Close();
+        Program.ReleaseInstanceKeyForRestart();
+        try
+        {
+            System.Diagnostics.Process.Start(startInfo);
+            Window.Close();
+        }
+        catch
+        {
+            Program.ReclaimInstanceKeyAfterFailedRestart();
+            throw;
+        }
     }
 
     private static string LoadLanguage()
@@ -132,4 +214,9 @@ public partial class App : Application
         }
     }
 
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern nint CommandLineToArgvW(string commandLine, out int argumentCount);
+
+    [DllImport("kernel32.dll")]
+    private static extern nint LocalFree(nint memory);
 }
