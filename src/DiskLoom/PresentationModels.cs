@@ -1,12 +1,94 @@
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using DiskLoom.Core.Models;
 using DiskLoom.Core.Services;
 using DiskLoom.Services;
+using Microsoft.UI.Xaml;
 
 namespace DiskLoom;
 
-public sealed class NodeRow(ScanNode source, bool displayAllocated = false)
+public sealed record BreadcrumbSegment(string Label, string FullPath, ScanNode? Source)
+{
+    public override string ToString() => Label;
+}
+
+public sealed class FolderTreeRow
+{
+    public FolderTreeRow(string fullPath, ScanNode? source)
+    {
+        Source = source;
+        FullPath = fullPath;
+        Name = source?.Name ?? FormatName(fullPath);
+    }
+
+    public ScanNode? Source { get; }
+    public string FullPath { get; }
+    public string Name { get; }
+    public string Glyph => "\uE8B7";
+    public string PrimarySizeText => Source is null ? "—" : ByteFormatter.Format(Source.Size);
+
+    private static string FormatName(string path)
+    {
+        var root = Path.GetPathRoot(path);
+        if (!string.IsNullOrEmpty(root) && path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                .Equals(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+        {
+            return root;
+        }
+        return Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+    }
+}
+
+public sealed class ResultColumnLayout : INotifyPropertyChanged
+{
+    internal static ResultColumnLayout Fallback { get; } = new();
+
+    private GridLength _nameWidth = new(1.4, GridUnitType.Star);
+    private GridLength _sizeWidth = new(1, GridUnitType.Star);
+    private GridLength _allocatedWidth = new(1, GridUnitType.Star);
+    private GridLength _modifiedWidth = new(1.2, GridUnitType.Star);
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    public GridLength NameWidth
+    {
+        get => _nameWidth;
+        set => Set(ref _nameWidth, value);
+    }
+
+    public GridLength SizeWidth
+    {
+        get => _sizeWidth;
+        set => Set(ref _sizeWidth, value);
+    }
+
+    public GridLength AllocatedWidth
+    {
+        get => _allocatedWidth;
+        set => Set(ref _allocatedWidth, value);
+    }
+
+    public GridLength ModifiedWidth
+    {
+        get => _modifiedWidth;
+        set => Set(ref _modifiedWidth, value);
+    }
+
+    private void Set(ref GridLength field, GridLength value, [CallerMemberName] string? propertyName = null)
+    {
+        if (field.Equals(value))
+        {
+            return;
+        }
+        field = value;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
+}
+
+public sealed class NodeRow(ScanNode source, bool displayAllocated = false, ResultColumnLayout? columnLayout = null)
 {
     public ScanNode Source { get; } = source;
+    public ResultColumnLayout ColumnLayout { get; } = columnLayout ?? ResultColumnLayout.Fallback;
     public string Name => Source.Name;
     public string Path => Source.FullPath;
     public string Glyph => Source.IsDirectory ? "\uE8B7" : "\uE7C3";

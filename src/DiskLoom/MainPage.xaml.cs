@@ -6,6 +6,7 @@ using DiskLoom.Core.Services;
 using DiskLoom.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
@@ -19,6 +20,9 @@ namespace DiskLoom;
 public sealed partial class MainPage : Page
 {
     private const bool DisplayAllocatedMeasurements = false;
+    private const double DefaultTreePaneWidth = 420;
+    private const int ArrowCursorId = 32512;
+    private const int ResizeHorizontalCursorId = 32644;
     private readonly FileSystemScanner _scanner = new();
     private readonly DuplicateFinder _duplicateFinder = new();
     private readonly SnapshotService _snapshotService = new();
@@ -28,6 +32,9 @@ public sealed partial class MainPage : Page
     private readonly FileOperationService _fileOperations = new();
     private readonly UpdateService _updateService = new();
     private readonly Dictionary<string, ScanNode> _nodesByPath = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, ScanNode?> _parentsByPath = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, TreeViewNode> _treeNodesByPath = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<ScanNode> _navigationHistory = [];
     private CancellationTokenSource? _workCancellation;
     private ScanResult? _scanResult;
     private ScanNode? _currentNode;
@@ -35,8 +42,12 @@ public sealed partial class MainPage : Page
     private SortColumn _sortColumn = SortColumn.Size;
     private bool _sortDescending = true;
     private bool _syncingSortControls;
+    private bool _syncingTreeSelection;
     private bool _notificationShowsIssues;
     private int _lastNonIssuesTab;
+    private int _navigationIndex = -1;
+
+    public ResultColumnLayout ResultColumns { get; } = new();
 
     public MainPage()
     {
@@ -51,7 +62,22 @@ public sealed partial class MainPage : Page
         }
 
         _loaded = true;
+        ToolTipService.SetToolTip(BackButton, LocalizationService.Get("Back"));
+        ToolTipService.SetToolTip(ForwardButton, LocalizationService.Get("Forward"));
         ToolTipService.SetToolTip(UpButton, LocalizationService.Get("UpOneLevel"));
+        ToolTipService.SetToolTip(EditPathButton, LocalizationService.Get("EditPath"));
+        ToolTipService.SetToolTip(TreeSplitter, LocalizationService.Get("TreeSplitterTip"));
+        var columnResizeTip = LocalizationService.Get("ResultColumnResizeTip");
+        foreach (var splitter in new[] { NameColumnSplitter, SizeColumnSplitter, AllocatedColumnSplitter, ModifiedColumnSplitter })
+        {
+            ToolTipService.SetToolTip(splitter, columnResizeTip);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(splitter, columnResizeTip);
+        }
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(BackButton, LocalizationService.Get("Back"));
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ForwardButton, LocalizationService.Get("Forward"));
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(UpButton, LocalizationService.Get("UpOneLevel"));
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(EditPathButton, LocalizationService.Get("EditPath"));
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(TreeSplitter, LocalizationService.Get("TreeSplitterTip"));
         UpdateSortIndicators();
         DrivePicker.ItemsSource = _driveService.GetDrives().Select(static drive => new DriveRow(drive)).ToArray();
         PathBox.Text = App.StartupScanPath ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -81,12 +107,19 @@ public sealed partial class MainPage : Page
 
     private async void ScanPath_Click(object sender, RoutedEventArgs e) => await StartScanAsync(PathBox.Text);
 
+    internal Task StartExternalScanAsync(string path) => StartScanAsync(path);
+
     private async void PathBox_KeyDown(object sender, KeyRoutedEventArgs e)
     {
         if (e.Key == VirtualKey.Enter)
         {
             e.Handled = true;
             await StartScanAsync(PathBox.Text);
+        }
+        else if (e.Key == VirtualKey.Escape && _currentNode is not null)
+        {
+            e.Handled = true;
+            ShowBreadcrumb();
         }
     }
 
@@ -104,6 +137,7 @@ public sealed partial class MainPage : Page
     {
         if (DrivePicker.SelectedItem is DriveRow row && row.Drive.IsReady)
         {
+            ShowPathEditor();
             PathBox.Text = row.Drive.Name;
         }
     }
@@ -124,6 +158,12 @@ public sealed partial class MainPage : Page
         catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
         {
             ShowNotification(exception.Message, InfoBarSeverity.Error);
+            return;
+        }
+
+        if (!Directory.Exists(path))
+        {
+            ShowNotification(LocalizationService.Format("ScanPathMissing", path), InfoBarSeverity.Error);
             return;
         }
 
@@ -156,10 +196,8 @@ public sealed partial class MainPage : Page
 
             _scanResult = result;
             _nodesByPath.Clear();
-            foreach (var node in result.Root.DescendantsAndSelf())
-            {
-                _nodesByPath[node.FullPath] = node;
-            }
+            _parentsByPath.Clear();
+            IndexScanNodes(result.Root, parent: null);
 
             PopulateScan(result);
             ShowNode(result.Root);
@@ -195,10 +233,27 @@ public sealed partial class MainPage : Page
     private void PopulateScan(ScanResult result)
     {
         DirectoryTree.RootNodes.Clear();
-        var rootNode = CreateTreeNode(result.Root);
-        rootNode.IsExpanded = true;
-        DirectoryTree.RootNodes.Add(rootNode);
-        PopulateTreeChildren(rootNode);
+        _treeNodesByPath.Clear();
+        TreeViewNode? parentTreeNode = null;
+        foreach (var path in GetPathChain(result.Root.FullPath))
+        {
+            _nodesByPath.TryGetValue(path, out var scannedNode);
+            var treeNode = CreateTreeNode(path, scannedNode);
+            if (parentTreeNode is null)
+            {
+                DirectoryTree.RootNodes.Add(treeNode);
+            }
+            else
+            {
+                parentTreeNode.Children.Add(treeNode);
+                parentTreeNode.IsExpanded = true;
+            }
+            parentTreeNode = treeNode;
+        }
+        if (parentTreeNode?.HasUnrealizedChildren == true)
+        {
+            PopulateTreeChildren(parentTreeNode);
+        }
         TreeCountText.Text = $"{result.Root.FolderCount + 1:N0}";
 
         const bool displayAllocated = DisplayAllocatedMeasurements;
@@ -221,27 +276,29 @@ public sealed partial class MainPage : Page
         CompareButton.IsEnabled = true;
     }
 
-    private TreeViewNode CreateTreeNode(ScanNode node)
+    private TreeViewNode CreateTreeNode(string fullPath, ScanNode? node)
     {
-        const bool displayAllocated = DisplayAllocatedMeasurements;
-        return new TreeViewNode
+        var treeNode = new TreeViewNode
         {
-            Content = new NodeRow(node, displayAllocated),
-            HasUnrealizedChildren = node.Children.Any(static child => child.IsDirectory)
+            Content = new FolderTreeRow(fullPath, node),
+            HasUnrealizedChildren = node?.Children.Any(static child => child.IsDirectory) == true
         };
+        _treeNodesByPath[fullPath] = treeNode;
+        return treeNode;
     }
 
     private void PopulateTreeChildren(TreeViewNode treeNode)
     {
-        if (treeNode.Content is not NodeRow row)
+        if (treeNode.Content is not FolderTreeRow { Source: { } source })
         {
+            treeNode.HasUnrealizedChildren = false;
             return;
         }
 
         treeNode.Children.Clear();
-        foreach (var child in row.Source.Children.Where(static child => child.IsDirectory))
+        foreach (var child in source.Children.Where(static child => child.IsDirectory))
         {
-            treeNode.Children.Add(CreateTreeNode(child));
+            treeNode.Children.Add(CreateTreeNode(child.FullPath, child));
         }
         treeNode.HasUnrealizedChildren = false;
     }
@@ -254,49 +311,264 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private void DirectoryTree_ItemInvoked(TreeView sender, TreeViewItemInvokedEventArgs args)
+    private async void DirectoryTree_ItemInvoked(TreeView sender, TreeViewItemInvokedEventArgs args)
     {
         if (ResolveTreeRow(sender, args.InvokedItem) is { } row)
         {
-            ShowNode(row.Source);
+            if (row.Source is not null)
+            {
+                ShowNode(row.Source);
+            }
+            else
+            {
+                await StartScanAsync(row.FullPath);
+            }
         }
     }
 
     private void DirectoryTree_SelectionChanged(TreeView sender, TreeViewSelectionChangedEventArgs args)
     {
-        if (sender.SelectedNode?.Content is NodeRow row)
+        if (!_syncingTreeSelection && sender.SelectedNode?.Content is FolderTreeRow { Source: { } source })
         {
-            ShowNode(row.Source);
+            ShowNode(source);
         }
     }
 
-    private void DirectoryTree_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    private static FolderTreeRow? ResolveTreeRow(TreeView tree, object? item) => item switch
     {
-        if (ResolveTreeRow(DirectoryTree, DirectoryTree.SelectedNode) is { } row)
-        {
-            ShowNode(row.Source);
-            e.Handled = true;
-        }
-    }
-
-    private static NodeRow? ResolveTreeRow(TreeView tree, object? item) => item switch
-    {
-        NodeRow row => row,
-        TreeViewNode { Content: NodeRow row } => row,
-        _ => tree.SelectedNode?.Content as NodeRow
+        FolderTreeRow row => row,
+        TreeViewNode { Content: FolderTreeRow row } => row,
+        _ => tree.SelectedNode?.Content as FolderTreeRow
     };
 
-    private void ShowNode(ScanNode node)
+    private void ShowNode(ScanNode node) => NavigateToNode(node, addToHistory: true);
+
+    private void NavigateToNode(ScanNode node, bool addToHistory)
     {
+        if (addToHistory)
+        {
+            AddNavigationEntry(node);
+        }
+
         _currentNode = node;
         PathBox.Text = node.FullPath;
+        UpdateBreadcrumb(node);
+        SynchronizeTreeToNode(node);
         LogicalSizeText.Text = ByteFormatter.Format(node.Size);
         AllocatedSizeText.Text = ByteFormatter.Format(node.AllocatedSize);
         FilesText.Text = node.FileCount.ToString("N0");
         FoldersText.Text = node.FolderCount.ToString("N0");
-        UpButton.IsEnabled = _scanResult is not null && !node.FullPath.Equals(_scanResult.Root.FullPath, StringComparison.OrdinalIgnoreCase);
+        UpdateNavigationButtons();
         ApplyFilter();
         RenderTreemap();
+    }
+
+    private void AddNavigationEntry(ScanNode node)
+    {
+        if (_navigationIndex >= 0 &&
+            _navigationIndex < _navigationHistory.Count &&
+            _navigationHistory[_navigationIndex].FullPath.Equals(node.FullPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (_navigationIndex + 1 < _navigationHistory.Count)
+        {
+            _navigationHistory.RemoveRange(_navigationIndex + 1, _navigationHistory.Count - _navigationIndex - 1);
+        }
+
+        _navigationHistory.Add(node);
+        _navigationIndex = _navigationHistory.Count - 1;
+    }
+
+    private void NavigateHistory(int newIndex)
+    {
+        if (newIndex < 0 || newIndex >= _navigationHistory.Count || newIndex == _navigationIndex)
+        {
+            return;
+        }
+
+        _navigationIndex = newIndex;
+        NavigateToNode(_navigationHistory[_navigationIndex], addToHistory: false);
+    }
+
+    private void UpdateNavigationButtons()
+    {
+        BackButton.IsEnabled = _navigationIndex > 0;
+        ForwardButton.IsEnabled = _navigationIndex >= 0 && _navigationIndex + 1 < _navigationHistory.Count;
+        UpButton.IsEnabled = _currentNode is not null && GetParentPath(_currentNode.FullPath) is not null;
+    }
+
+    private void IndexScanNodes(ScanNode node, ScanNode? parent)
+    {
+        var stack = new Stack<(ScanNode Node, ScanNode? Parent)>();
+        stack.Push((node, parent));
+        while (stack.TryPop(out var entry))
+        {
+            _nodesByPath[entry.Node.FullPath] = entry.Node;
+            _parentsByPath[entry.Node.FullPath] = entry.Parent;
+            for (var index = entry.Node.Children.Count - 1; index >= 0; index--)
+            {
+                stack.Push((entry.Node.Children[index], entry.Node));
+            }
+        }
+    }
+
+    private static IReadOnlyList<string> GetPathChain(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(fullPath);
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return [fullPath];
+        }
+
+        var chain = new List<string> { root };
+        var relativePath = Path.GetRelativePath(root, fullPath);
+        if (relativePath == ".")
+        {
+            return chain;
+        }
+
+        var current = root;
+        foreach (var segment in relativePath.Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            chain.Add(current);
+        }
+        return chain;
+    }
+
+    private static string? GetParentPath(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(fullPath);
+        if (!string.IsNullOrWhiteSpace(root) &&
+            fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                .Equals(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+        return Directory.GetParent(fullPath)?.FullName;
+    }
+
+    private void UpdateBreadcrumb(ScanNode node)
+    {
+        PathBreadcrumb.ItemsSource = GetPathChain(node.FullPath)
+            .Select(path =>
+            {
+                _nodesByPath.TryGetValue(path, out var scannedNode);
+                return new BreadcrumbSegment(new FolderTreeRow(path, scannedNode).Name, path, scannedNode);
+            })
+            .ToArray();
+        ShowBreadcrumb();
+    }
+
+    private void SynchronizeTreeToNode(ScanNode node)
+    {
+        TreeViewNode? currentTreeNode = null;
+        foreach (var path in GetPathChain(node.FullPath))
+        {
+            if (!_treeNodesByPath.TryGetValue(path, out var realizedNode))
+            {
+                if (currentTreeNode is null)
+                {
+                    return;
+                }
+                if (currentTreeNode.HasUnrealizedChildren)
+                {
+                    PopulateTreeChildren(currentTreeNode);
+                }
+                if (!_treeNodesByPath.TryGetValue(path, out realizedNode))
+                {
+                    return;
+                }
+            }
+
+            currentTreeNode = realizedNode;
+            if (!path.Equals(node.FullPath, StringComparison.OrdinalIgnoreCase))
+            {
+                currentTreeNode.IsExpanded = true;
+            }
+        }
+
+        if (currentTreeNode is null)
+        {
+            return;
+        }
+
+        if (currentTreeNode.HasUnrealizedChildren)
+        {
+            PopulateTreeChildren(currentTreeNode);
+        }
+        currentTreeNode.IsExpanded = currentTreeNode.Children.Count > 0;
+
+        _syncingTreeSelection = true;
+        try
+        {
+            DirectoryTree.SelectedNode = currentTreeNode;
+        }
+        finally
+        {
+            _syncingTreeSelection = false;
+        }
+
+        var expectedPath = node.FullPath;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_currentNode?.FullPath.Equals(expectedPath, StringComparison.OrdinalIgnoreCase) != true)
+            {
+                return;
+            }
+            DirectoryTree.UpdateLayout();
+            if (DirectoryTree.ContainerFromNode(currentTreeNode) is TreeViewItem container)
+            {
+                container.StartBringIntoView();
+            }
+        });
+    }
+
+    private void ShowBreadcrumb()
+    {
+        if (_currentNode is null)
+        {
+            return;
+        }
+        PathBox.Visibility = Visibility.Collapsed;
+        PathBreadcrumb.Visibility = Visibility.Visible;
+        EditPathButton.Visibility = Visibility.Visible;
+    }
+
+    private void ShowPathEditor()
+    {
+        PathBreadcrumb.Visibility = Visibility.Collapsed;
+        PathBox.Visibility = Visibility.Visible;
+        EditPathButton.Visibility = Visibility.Collapsed;
+        PathBox.Focus(FocusState.Programmatic);
+        PathBox.SelectAll();
+    }
+
+    private void Back_Click(object sender, RoutedEventArgs e) => NavigateHistory(_navigationIndex - 1);
+
+    private void Forward_Click(object sender, RoutedEventArgs e) => NavigateHistory(_navigationIndex + 1);
+
+    private void EditPath_Click(object sender, RoutedEventArgs e) => ShowPathEditor();
+
+    private async void PathBreadcrumb_ItemClicked(BreadcrumbBar sender, BreadcrumbBarItemClickedEventArgs args)
+    {
+        if (args.Item is BreadcrumbSegment segment)
+        {
+            if (segment.Source is not null)
+            {
+                ShowNode(segment.Source);
+            }
+            else
+            {
+                await StartScanAsync(segment.FullPath);
+            }
+        }
     }
 
     private void ApplyFilter()
@@ -329,7 +601,7 @@ public sealed partial class MainPage : Page
         ChildrenList.ItemsSource = nodes
             .Where(static node => node.IsDirectory ? Directory.Exists(node.FullPath) : File.Exists(node.FullPath))
             .Take(100_000)
-            .Select(node => new NodeRow(node, displayAllocated))
+            .Select(node => new NodeRow(node, displayAllocated, ResultColumns))
             .ToArray();
     }
 
@@ -450,21 +722,163 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private void Up_Click(object sender, RoutedEventArgs e)
+    private async void Up_Click(object sender, RoutedEventArgs e)
     {
-        if (_currentNode is null || _scanResult is null)
+        if (_currentNode is null)
         {
             return;
         }
 
-        var parentPath = Directory.GetParent(_currentNode.FullPath)?.FullName;
-        if (parentPath is not null && _nodesByPath.TryGetValue(parentPath, out var parent))
+        if (_parentsByPath.TryGetValue(_currentNode.FullPath, out var parent) && parent is not null)
         {
             ShowNode(parent);
+            return;
         }
-        else
+
+        var parentPath = GetParentPath(_currentNode.FullPath);
+        if (parentPath is not null)
         {
-            ShowNode(_scanResult.Root);
+            await StartScanAsync(parentPath);
+        }
+    }
+
+    private void TreeSplitter_DragDelta(object sender, DragDeltaEventArgs e)
+    {
+        var availableMaximum = Math.Max(TreePaneColumn.MinWidth, WorkspaceGrid.ActualWidth - 680);
+        var maximum = Math.Min(TreePaneColumn.MaxWidth, availableMaximum);
+        TreePaneColumn.Width = new GridLength(Math.Clamp(
+            TreePaneColumn.ActualWidth + e.HorizontalChange,
+            TreePaneColumn.MinWidth,
+            maximum));
+    }
+
+    private void TreeSplitter_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        TreePaneColumn.Width = new GridLength(DefaultTreePaneWidth);
+        e.Handled = true;
+    }
+
+    private void TreeSplitter_PointerEntered(object sender, PointerRoutedEventArgs e) =>
+        SetSystemCursor(ResizeHorizontalCursorId);
+
+    private void TreeSplitter_PointerExited(object sender, PointerRoutedEventArgs e) =>
+        SetSystemCursor(ArrowCursorId);
+
+    private static void SetSystemCursor(int cursorId)
+    {
+        var cursor = LoadCursor(nint.Zero, (nint)cursorId);
+        if (cursor != nint.Zero)
+        {
+            SetCursor(cursor);
+        }
+    }
+
+    private void ResultColumnSplitter_DragDelta(object sender, DragDeltaEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: string column })
+        {
+            return;
+        }
+
+        var minimum = GetResultColumnMinimum(column);
+        var maximum = GetResultColumnMaximum(column);
+        var width = Math.Clamp(GetResultColumnActualWidth(column) + e.HorizontalChange, minimum, maximum);
+        SetResultColumnWidth(column, new GridLength(width));
+    }
+
+    private void ResultColumnSplitter_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: string column })
+        {
+            FitResultColumn(column);
+            e.Handled = true;
+        }
+    }
+
+    private void FitResultColumn(string column)
+    {
+        var rows = ChildrenList.ItemsSource as IEnumerable<NodeRow> ?? [];
+        var values = column switch
+        {
+            "Name" => rows.SelectMany(static row => new[] { row.Name, row.CountText }),
+            "Size" => rows.Select(static row => row.SizeText),
+            "Allocated" => rows.Select(static row => row.AllocatedText),
+            "Modified" => rows.Select(static row => row.ModifiedText),
+            _ => []
+        };
+        var header = column switch
+        {
+            "Name" => NameHeaderText.Text,
+            "Size" => SizeHeaderText.Text,
+            "Allocated" => AllocatedHeaderText.Text,
+            "Modified" => ModifiedHeaderText.Text,
+            _ => string.Empty
+        };
+
+        var candidates = values
+            .Append(header)
+            .Where(static value => !string.IsNullOrEmpty(value))
+            .Distinct(StringComparer.CurrentCulture)
+            .OrderByDescending(static value => value.Length)
+            .Take(128);
+        var measurer = new TextBlock { FontSize = 14 };
+        var measured = 0d;
+        foreach (var value in candidates)
+        {
+            measurer.Text = value;
+            measurer.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            measured = Math.Max(measured, measurer.DesiredSize.Width);
+        }
+
+        var padding = column == "Name" ? 24 : 30;
+        SetResultColumnWidth(column, new GridLength(Math.Clamp(
+            measured + padding,
+            GetResultColumnMinimum(column),
+            GetResultColumnMaximum(column))));
+    }
+
+    private double GetResultColumnActualWidth(string column) => column switch
+    {
+        "Name" => NameResultColumn.ActualWidth,
+        "Size" => SizeResultColumn.ActualWidth,
+        "Allocated" => AllocatedResultColumn.ActualWidth,
+        "Modified" => ModifiedResultColumn.ActualWidth,
+        _ => 0
+    };
+
+    private static double GetResultColumnMinimum(string column) => column switch
+    {
+        "Name" => 140,
+        "Size" => 96,
+        "Allocated" => 110,
+        "Modified" => 135,
+        _ => 80
+    };
+
+    private double GetResultColumnMaximum(string column)
+    {
+        var available = Math.Max(320, ResultHeaderGrid.ActualWidth);
+        return column == "Name"
+            ? Math.Max(GetResultColumnMinimum(column), available * 0.60)
+            : Math.Max(GetResultColumnMinimum(column), Math.Min(320, available * 0.42));
+    }
+
+    private void SetResultColumnWidth(string column, GridLength width)
+    {
+        switch (column)
+        {
+            case "Name":
+                ResultColumns.NameWidth = width;
+                break;
+            case "Size":
+                ResultColumns.SizeWidth = width;
+                break;
+            case "Allocated":
+                ResultColumns.AllocatedWidth = width;
+                break;
+            case "Modified":
+                ResultColumns.ModifiedWidth = width;
+                break;
         }
     }
 
@@ -1032,6 +1446,7 @@ public sealed partial class MainPage : Page
     private void ResetResults()
     {
         DirectoryTree.RootNodes.Clear();
+        _treeNodesByPath.Clear();
         ChildrenList.ItemsSource = null;
         LargestFilesList.ItemsSource = null;
         ExtensionsList.ItemsSource = null;
@@ -1049,12 +1464,22 @@ public sealed partial class MainPage : Page
         _scanResult = null;
         _currentNode = null;
         _nodesByPath.Clear();
+        _parentsByPath.Clear();
+        _navigationHistory.Clear();
+        _navigationIndex = -1;
         RefreshButton.IsEnabled = false;
         ExportButton.IsEnabled = false;
         SaveSnapshotButton.IsEnabled = false;
         CompareButton.IsEnabled = false;
+        BackButton.IsEnabled = false;
+        ForwardButton.IsEnabled = false;
         UpButton.IsEnabled = false;
+        PathBreadcrumb.ItemsSource = null;
+        PathBreadcrumb.Visibility = Visibility.Collapsed;
+        PathBox.Visibility = Visibility.Visible;
+        EditPathButton.Visibility = Visibility.Collapsed;
         NotificationActionButton.Visibility = Visibility.Collapsed;
+        NotificationBar.IsOpen = false;
         _notificationShowsIssues = false;
     }
 
@@ -1120,6 +1545,12 @@ public sealed partial class MainPage : Page
     }
 
     private static long GetMeasure(ScanNode node, bool allocated) => allocated ? node.AllocatedSize : node.Size;
+
+    [DllImport("user32.dll", EntryPoint = "LoadCursorW")]
+    private static extern nint LoadCursor(nint instance, nint cursorName);
+
+    [DllImport("user32.dll")]
+    private static extern nint SetCursor(nint cursor);
 
     private static string SanitizeFileName(string name)
     {

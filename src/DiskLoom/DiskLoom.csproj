@@ -8,7 +8,7 @@
     <AssemblyName Condition="'$(DiskLoomAssemblyName)' == ''">DiskLoom</AssemblyName>
     <AssemblyName Condition="'$(DiskLoomAssemblyName)' != ''">$(DiskLoomAssemblyName)</AssemblyName>
     <Product>DiskLoom</Product>
-    <Version>0.1.10</Version>
+    <Version>0.1.11</Version>
     <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
     <RepositoryUrl>https://github.com/Naxterra/DiskLoom</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
@@ -27,6 +27,7 @@
     <Nullable>enable</Nullable>
     <PublishReadyToRun>false</PublishReadyToRun>
     <PublishTrimmed>false</PublishTrimmed>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
