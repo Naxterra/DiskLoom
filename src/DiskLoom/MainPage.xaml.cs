@@ -33,19 +33,26 @@ public sealed partial class MainPage : Page
     private readonly UpdateService _updateService = new();
     private readonly Dictionary<string, ScanNode> _nodesByPath = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, ScanNode?> _parentsByPath = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, ScanResult> _scanCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, TreeViewNode> _treeNodesByPath = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<TreeViewNode> _treeNodesBeingPopulated = [];
     private readonly List<ScanNode> _navigationHistory = [];
+    private IReadOnlyList<DriveSummary> _drives = [];
     private CancellationTokenSource? _workCancellation;
     private ScanResult? _scanResult;
     private ScanNode? _currentNode;
+    private FolderTreeRow? _treeContextRow;
     private bool _loaded;
     private SortColumn _sortColumn = SortColumn.Size;
     private bool _sortDescending = true;
     private bool _syncingSortControls;
+    private bool _syncingDrivePicker;
     private bool _syncingTreeSelection;
+    private bool _updatingTree;
     private bool _notificationShowsIssues;
     private int _lastNonIssuesTab;
     private int _navigationIndex = -1;
+    private long _scanRequestId;
 
     public ResultColumnLayout ResultColumns { get; } = new();
 
@@ -79,7 +86,9 @@ public sealed partial class MainPage : Page
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(EditPathButton, LocalizationService.Get("EditPath"));
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(TreeSplitter, LocalizationService.Get("TreeSplitterTip"));
         UpdateSortIndicators();
-        DrivePicker.ItemsSource = _driveService.GetDrives().Select(static drive => new DriveRow(drive)).ToArray();
+        _drives = _driveService.GetDrives();
+        DrivePicker.ItemsSource = _drives.Select(static drive => new DriveRow(drive)).ToArray();
+        RebuildDirectoryTree(result: null);
         PathBox.Text = App.StartupScanPath ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
         if (!string.IsNullOrWhiteSpace(App.StartupScanPath))
@@ -133,16 +142,23 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private void DrivePicker_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void DrivePicker_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (DrivePicker.SelectedItem is DriveRow row && row.Drive.IsReady)
+        if (_syncingDrivePicker || DrivePicker.SelectedItem is not DriveRow row)
         {
-            ShowPathEditor();
-            PathBox.Text = row.Drive.Name;
+            return;
         }
+
+        if (!row.Drive.IsReady)
+        {
+            ShowNotification(LocalizationService.Get("NotReady"), InfoBarSeverity.Warning);
+            return;
+        }
+
+        await StartScanAsync(row.Drive.Name, useCachedResult: true);
     }
 
-    private async Task StartScanAsync(string? requestedPath)
+    private async Task StartScanAsync(string? requestedPath, bool useCachedResult = false)
     {
         if (string.IsNullOrWhiteSpace(requestedPath))
         {
@@ -167,15 +183,37 @@ public sealed partial class MainPage : Page
             return;
         }
 
+        var requestId = Interlocked.Increment(ref _scanRequestId);
         _workCancellation?.Cancel();
-        _workCancellation?.Dispose();
+
+        // A drive can start a scan from TreeView.ItemInvoked or ComboBox.SelectionChanged.
+        // Let that control finish its own collection update before rebuilding the tree.
+        await Task.Yield();
+
+        if (requestId != Volatile.Read(ref _scanRequestId))
+        {
+            return;
+        }
+
+        if (useCachedResult && _scanCache.TryGetValue(path, out var cachedResult))
+        {
+            ResetResults();
+            ActivateScanResult(cachedResult, loadedFromCache: true);
+            return;
+        }
+
         var cancellation = new CancellationTokenSource();
         _workCancellation = cancellation;
         SetBusy(true, LocalizationService.Get("StartingScan"));
         ResetResults();
+        SelectDriveForPath(path);
         PathBox.Text = path;
         var progress = new Progress<ScanProgress>(value =>
         {
+            if (requestId != Volatile.Read(ref _scanRequestId))
+            {
+                return;
+            }
             StatusText.Text = value.CurrentPath;
             StatusDetailText.Text = LocalizationService.Format("ScanProgressDetail", value.FilesScanned, ByteFormatter.Format(value.BytesScanned), value.Elapsed);
         });
@@ -189,71 +227,69 @@ public sealed partial class MainPage : Page
                 FollowReparsePoints = false
             }, progress, cancellation.Token);
 
-            if (cancellation.IsCancellationRequested)
+            if (cancellation.IsCancellationRequested || requestId != Volatile.Read(ref _scanRequestId))
             {
                 return;
             }
 
-            _scanResult = result;
-            _nodesByPath.Clear();
-            _parentsByPath.Clear();
-            IndexScanNodes(result.Root, parent: null);
-
-            PopulateScan(result);
-            ShowNode(result.Root);
-            StatusText.Text = LocalizationService.Format("ScanComplete", result.Root.FullPath);
-            StatusDetailText.Text = LocalizationService.Format("ScanCompleteDetail", result.Root.FileCount, ByteFormatter.Format(result.Root.Size), result.Duration);
-            if (result.Issues.Count > 0)
-            {
-                ShowNotification(DescribeIssues(result.Issues), InfoBarSeverity.Warning, showIssuesAction: true);
-            }
+            _scanCache[path] = result;
+            ActivateScanResult(result, loadedFromCache: false);
         }
         catch (OperationCanceledException)
         {
-            StatusText.Text = LocalizationService.Get("ScanCanceled");
-            StatusDetailText.Text = string.Empty;
+            if (requestId == Volatile.Read(ref _scanRequestId))
+            {
+                StatusText.Text = LocalizationService.Get("ScanCanceled");
+                StatusDetailText.Text = string.Empty;
+            }
         }
         catch (Exception exception)
         {
-            StatusText.Text = LocalizationService.Get("ScanFailed");
-            StatusDetailText.Text = string.Empty;
-            ShowNotification(exception.Message, InfoBarSeverity.Error);
+            if (requestId == Volatile.Read(ref _scanRequestId))
+            {
+                StatusText.Text = LocalizationService.Get("ScanFailed");
+                StatusDetailText.Text = string.Empty;
+                ShowNotification(exception.Message, InfoBarSeverity.Error);
+            }
         }
         finally
         {
             if (ReferenceEquals(_workCancellation, cancellation))
             {
                 SetBusy(false);
-                cancellation.Dispose();
                 _workCancellation = null;
             }
+            cancellation.Dispose();
+        }
+    }
+
+    private void ActivateScanResult(ScanResult result, bool loadedFromCache)
+    {
+        _scanResult = result;
+        _nodesByPath.Clear();
+        _parentsByPath.Clear();
+        IndexScanNodes(result.Root, parent: null);
+
+        PopulateScan(result);
+        ShowNode(result.Root);
+        StatusText.Text = loadedFromCache
+            ? LocalizationService.Format("CachedScanLoaded", result.Root.FullPath)
+            : LocalizationService.Format("ScanComplete", result.Root.FullPath);
+        StatusDetailText.Text = LocalizationService.Format(
+            "ScanCompleteDetail",
+            result.Root.FileCount,
+            ByteFormatter.Format(result.Root.Size),
+            result.Duration);
+
+        if (result.Issues.Any(static issue => !IsAccessDeniedIssue(issue)))
+        {
+            ShowNotification(DescribeIssues(result.Issues), InfoBarSeverity.Warning, showIssuesAction: true);
         }
     }
 
     private void PopulateScan(ScanResult result)
     {
-        DirectoryTree.RootNodes.Clear();
-        _treeNodesByPath.Clear();
-        TreeViewNode? parentTreeNode = null;
-        foreach (var path in GetPathChain(result.Root.FullPath))
-        {
-            _nodesByPath.TryGetValue(path, out var scannedNode);
-            var treeNode = CreateTreeNode(path, scannedNode);
-            if (parentTreeNode is null)
-            {
-                DirectoryTree.RootNodes.Add(treeNode);
-            }
-            else
-            {
-                parentTreeNode.Children.Add(treeNode);
-                parentTreeNode.IsExpanded = true;
-            }
-            parentTreeNode = treeNode;
-        }
-        if (parentTreeNode?.HasUnrealizedChildren == true)
-        {
-            PopulateTreeChildren(parentTreeNode);
-        }
+        RebuildDirectoryTree(result);
         TreeCountText.Text = $"{result.Root.FolderCount + 1:N0}";
 
         const bool displayAllocated = DisplayAllocatedMeasurements;
@@ -266,9 +302,16 @@ public sealed partial class MainPage : Page
         AgeList.ItemsSource = result.Ages.Select(static item => new AgeRow(item)).ToArray();
         InsightsList.ItemsSource = _insightService.Analyze(result).Select(static item => new InsightRow(item)).ToArray();
         IssuesList.ItemsSource = result.Issues.Select(static item => new IssueRow(item)).ToArray();
+        var accessDeniedCount = result.Issues.Count(IsAccessDeniedIssue);
+        var otherIssueCount = result.Issues.Count - accessDeniedCount;
+        IssuesTab.Header = result.Issues.Count == 0
+            ? LocalizationService.Get("IssuesTabLabel")
+            : LocalizationService.Format("IssuesTabCount", result.Issues.Count);
         IssuesHeaderText.Text = result.Issues.Count == 0
             ? LocalizationService.Get("NoIssues")
-            : LocalizationService.Format("IssuesRecorded", result.Issues.Count);
+            : otherIssueCount == 0
+                ? LocalizationService.Format("AccessDeniedSummary", accessDeniedCount)
+                : LocalizationService.Format("IssuesRecorded", result.Issues.Count);
 
         RefreshButton.IsEnabled = true;
         ExportButton.IsEnabled = true;
@@ -276,11 +319,75 @@ public sealed partial class MainPage : Page
         CompareButton.IsEnabled = true;
     }
 
-    private TreeViewNode CreateTreeNode(string fullPath, ScanNode? node)
+    private void RebuildDirectoryTree(ScanResult? result)
+    {
+        _updatingTree = true;
+        try
+        {
+            DirectoryTree.RootNodes.Clear();
+            _treeNodesByPath.Clear();
+
+            var scanVolumeRoot = result is null ? null : Path.GetPathRoot(result.Root.FullPath);
+            var attachedScan = false;
+            foreach (var drive in _drives)
+            {
+                if (result is not null && PathsEqual(drive.Name, scanVolumeRoot))
+                {
+                    AddScanPathToTree(result, drive);
+                    attachedScan = true;
+                }
+                else
+                {
+                    DirectoryTree.RootNodes.Add(CreateTreeNode(drive.Name, node: null, drive));
+                }
+            }
+
+            if (result is not null && !attachedScan)
+            {
+                AddScanPathToTree(result, drive: null);
+            }
+        }
+        finally
+        {
+            _updatingTree = false;
+        }
+
+        if (result is null)
+        {
+            TreeCountText.Text = LocalizationService.Format("DriveCount", _drives.Count(static drive => drive.IsReady));
+        }
+    }
+
+    private void AddScanPathToTree(ScanResult result, DriveSummary? drive)
+    {
+        TreeViewNode? parentTreeNode = null;
+        foreach (var path in GetPathChain(result.Root.FullPath))
+        {
+            _nodesByPath.TryGetValue(path, out var scannedNode);
+            var treeNode = CreateTreeNode(path, scannedNode, parentTreeNode is null ? drive : null);
+            if (parentTreeNode is null)
+            {
+                DirectoryTree.RootNodes.Add(treeNode);
+            }
+            else
+            {
+                parentTreeNode.Children.Add(treeNode);
+                parentTreeNode.IsExpanded = true;
+            }
+            parentTreeNode = treeNode;
+        }
+
+        if (parentTreeNode?.HasUnrealizedChildren == true)
+        {
+            PopulateTreeChildren(parentTreeNode);
+        }
+    }
+
+    private TreeViewNode CreateTreeNode(string fullPath, ScanNode? node, DriveSummary? drive = null)
     {
         var treeNode = new TreeViewNode
         {
-            Content = new FolderTreeRow(fullPath, node),
+            Content = drive is null ? new FolderTreeRow(fullPath, node) : new FolderTreeRow(drive, node),
             HasUnrealizedChildren = node?.Children.Any(static child => child.IsDirectory) == true
         };
         _treeNodesByPath[fullPath] = treeNode;
@@ -289,23 +396,41 @@ public sealed partial class MainPage : Page
 
     private void PopulateTreeChildren(TreeViewNode treeNode)
     {
-        if (treeNode.Content is not FolderTreeRow { Source: { } source })
+        if (!_treeNodesBeingPopulated.Add(treeNode))
         {
-            treeNode.HasUnrealizedChildren = false;
             return;
         }
 
-        treeNode.Children.Clear();
-        foreach (var child in source.Children.Where(static child => child.IsDirectory))
+        try
         {
-            treeNode.Children.Add(CreateTreeNode(child.FullPath, child));
+            if (treeNode.Content is not FolderTreeRow { Source: { } source })
+            {
+                treeNode.HasUnrealizedChildren = false;
+                return;
+            }
+
+            // WinUI raises Expanding while it is already walking the node's child
+            // collection. Mark the lazy node realized before adding children and do
+            // not clear that collection from inside the event; either can otherwise
+            // cause a re-entrant collection modification exception.
+            treeNode.HasUnrealizedChildren = false;
+            if (treeNode.Children.Count == 0)
+            {
+                foreach (var child in source.Children.Where(static child => child.IsDirectory))
+                {
+                    treeNode.Children.Add(CreateTreeNode(child.FullPath, child));
+                }
+            }
         }
-        treeNode.HasUnrealizedChildren = false;
+        finally
+        {
+            _treeNodesBeingPopulated.Remove(treeNode);
+        }
     }
 
     private void DirectoryTree_Expanding(TreeView sender, TreeViewExpandingEventArgs args)
     {
-        if (args.Node.HasUnrealizedChildren)
+        if (!_updatingTree && args.Node.HasUnrealizedChildren)
         {
             PopulateTreeChildren(args.Node);
         }
@@ -313,24 +438,208 @@ public sealed partial class MainPage : Page
 
     private async void DirectoryTree_ItemInvoked(TreeView sender, TreeViewItemInvokedEventArgs args)
     {
+        if (_updatingTree)
+        {
+            return;
+        }
+
         if (ResolveTreeRow(sender, args.InvokedItem) is { } row)
         {
             if (row.Source is not null)
             {
-                ShowNode(row.Source);
+                NavigateToNode(row.Source, addToHistory: true, synchronizeTree: false);
+            }
+            else if (row.Drive is { IsReady: false })
+            {
+                ShowNotification(LocalizationService.Get("NotReady"), InfoBarSeverity.Warning);
             }
             else
             {
-                await StartScanAsync(row.FullPath);
+                await StartScanAsync(row.FullPath, useCachedResult: true);
             }
         }
     }
 
     private void DirectoryTree_SelectionChanged(TreeView sender, TreeViewSelectionChangedEventArgs args)
     {
-        if (!_syncingTreeSelection && sender.SelectedNode?.Content is FolderTreeRow { Source: { } source })
+        if (!_updatingTree && !_syncingTreeSelection && sender.SelectedNode?.Content is FolderTreeRow { Source: { } source })
         {
-            ShowNode(source);
+            // The TreeView already owns the correct selection. Synchronizing it here
+            // would set IsExpanded while WinUI is still processing SelectionChanged.
+            NavigateToNode(source, addToHistory: true, synchronizeTree: false);
+        }
+    }
+
+    private void DirectoryTree_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        var container = FindVisualParent<TreeViewItem>(e.OriginalSource as DependencyObject);
+        var node = container is null ? null : DirectoryTree.NodeFromContainer(container);
+        if (node is null || (!node.HasUnrealizedChildren && node.Children.Count == 0))
+        {
+            return;
+        }
+
+        e.Handled = true;
+        // DoubleTapped follows the selection events, but defer one dispatcher turn
+        // so WinUI has completely finished its internal TreeView collection update.
+        DispatcherQueue.TryEnqueue(() => node.IsExpanded = !node.IsExpanded);
+    }
+
+    private void DirectoryTree_RightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        _treeContextRow = null;
+        var container = FindVisualParent<TreeViewItem>(e.OriginalSource as DependencyObject);
+        var node = container is null ? null : DirectoryTree.NodeFromContainer(container);
+        if (node?.Content is not FolderTreeRow row)
+        {
+            return;
+        }
+
+        _treeContextRow = row;
+        _syncingTreeSelection = true;
+        try
+        {
+            DirectoryTree.SelectedNode = node;
+        }
+        finally
+        {
+            _syncingTreeSelection = false;
+        }
+    }
+
+    private void DirectoryTreeMenu_Opening(object sender, object e)
+    {
+        var row = GetTreeContextRow();
+        var canDelete = row is not null && CanDeleteTreeFolder(row);
+        TreeRecycleMenuItem.IsEnabled = canDelete;
+        TreeDeleteMenuItem.IsEnabled = canDelete;
+    }
+
+    private FolderTreeRow? GetTreeContextRow() =>
+        DirectoryTree.SelectedNode?.Content as FolderTreeRow ?? _treeContextRow;
+
+    private static T? FindVisualParent<T>(DependencyObject? element) where T : DependencyObject
+    {
+        while (element is not null)
+        {
+            if (element is T result)
+            {
+                return result;
+            }
+            element = VisualTreeHelper.GetParent(element);
+        }
+        return null;
+    }
+
+    private static bool CanDeleteTreeFolder(FolderTreeRow row)
+    {
+        if (row.Source?.IsDirectory != true || !Directory.Exists(row.FullPath))
+        {
+            return false;
+        }
+        var root = Path.GetPathRoot(row.FullPath);
+        return string.IsNullOrWhiteSpace(root) ||
+            !row.FullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                .Equals(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void TreeShowInExplorer_Click(object sender, RoutedEventArgs e)
+    {
+        if (GetTreeContextRow() is { } row)
+        {
+            _fileOperations.ShowInExplorer(row.FullPath);
+        }
+    }
+
+    private void TreeCopyPath_Click(object sender, RoutedEventArgs e)
+    {
+        if (GetTreeContextRow() is { } row)
+        {
+            CopyText(row.FullPath);
+        }
+    }
+
+    private async void TreeRecycle_Click(object sender, RoutedEventArgs e)
+    {
+        var row = GetTreeContextRow();
+        if (row is null || !CanDeleteTreeFolder(row))
+        {
+            return;
+        }
+
+        var dialog = CreateDialog(
+            LocalizationService.Get("RecycleFolderTitle"),
+            row.FullPath,
+            LocalizationService.Get("Recycle"),
+            LocalizationService.Get("Cancel"),
+            ContentDialogButton.Close);
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        try
+        {
+            await _fileOperations.RecycleAsync(row.FullPath);
+            _scanCache.Clear();
+            await RefreshAfterTreeDeletionAsync();
+            ShowNotification(LocalizationService.Get("FolderRecycled"), InfoBarSeverity.Success);
+        }
+        catch (Exception exception)
+        {
+            ShowNotification(exception.Message, InfoBarSeverity.Error);
+        }
+    }
+
+    private async void TreeDeletePermanently_Click(object sender, RoutedEventArgs e)
+    {
+        var row = GetTreeContextRow();
+        if (row is null || !CanDeleteTreeFolder(row))
+        {
+            return;
+        }
+
+        var dialog = CreateDialog(
+            LocalizationService.Get("DeleteFolderTitle"),
+            LocalizationService.Format("DeleteWarning", row.FullPath),
+            LocalizationService.Get("DeletePermanently"),
+            LocalizationService.Get("Cancel"),
+            ContentDialogButton.Close);
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        try
+        {
+            await _fileOperations.DeletePermanentlyAsync(row.FullPath);
+            _scanCache.Clear();
+            await RefreshAfterTreeDeletionAsync();
+            ShowNotification(LocalizationService.Get("FolderDeleted"), InfoBarSeverity.Warning);
+        }
+        catch (Exception exception)
+        {
+            ShowNotification(exception.Message, InfoBarSeverity.Error);
+        }
+    }
+
+    private async Task RefreshAfterTreeDeletionAsync()
+    {
+        var scanRoot = _scanResult?.Root.FullPath;
+        if (!string.IsNullOrWhiteSpace(scanRoot) && Directory.Exists(scanRoot))
+        {
+            await StartScanAsync(scanRoot);
+            return;
+        }
+
+        var parent = string.IsNullOrWhiteSpace(scanRoot) ? null : GetParentPath(scanRoot);
+        if (parent is not null && Directory.Exists(parent))
+        {
+            await StartScanAsync(parent);
+        }
+        else
+        {
+            ResetResults();
         }
     }
 
@@ -341,9 +650,9 @@ public sealed partial class MainPage : Page
         _ => tree.SelectedNode?.Content as FolderTreeRow
     };
 
-    private void ShowNode(ScanNode node) => NavigateToNode(node, addToHistory: true);
+    private void ShowNode(ScanNode node) => NavigateToNode(node, addToHistory: true, synchronizeTree: true);
 
-    private void NavigateToNode(ScanNode node, bool addToHistory)
+    private void NavigateToNode(ScanNode node, bool addToHistory, bool synchronizeTree = true)
     {
         if (addToHistory)
         {
@@ -353,7 +662,10 @@ public sealed partial class MainPage : Page
         _currentNode = node;
         PathBox.Text = node.FullPath;
         UpdateBreadcrumb(node);
-        SynchronizeTreeToNode(node);
+        if (synchronizeTree)
+        {
+            SynchronizeTreeToNode(node);
+        }
         LogicalSizeText.Text = ByteFormatter.Format(node.Size);
         AllocatedSizeText.Text = ByteFormatter.Format(node.AllocatedSize);
         FilesText.Text = node.FileCount.ToString("N0");
@@ -452,6 +764,40 @@ public sealed partial class MainPage : Page
             return null;
         }
         return Directory.GetParent(fullPath)?.FullName;
+    }
+
+    private static bool PathsEqual(string? left, string? right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+        {
+            return false;
+        }
+
+        return left.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            .Equals(
+                right.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void SelectDriveForPath(string path)
+    {
+        var root = Path.GetPathRoot(path);
+        var matchingDrive = (DrivePicker.ItemsSource as IEnumerable<DriveRow>)?
+            .FirstOrDefault(row => PathsEqual(row.Drive.Name, root));
+        if (matchingDrive is null || ReferenceEquals(DrivePicker.SelectedItem, matchingDrive))
+        {
+            return;
+        }
+
+        _syncingDrivePicker = true;
+        try
+        {
+            DrivePicker.SelectedItem = matchingDrive;
+        }
+        finally
+        {
+            _syncingDrivePicker = false;
+        }
     }
 
     private void UpdateBreadcrumb(ScanNode node)
@@ -585,9 +931,7 @@ public sealed partial class MainPage : Page
         }
 
         var query = FilterBox.Text.Trim();
-        IEnumerable<ScanNode> nodes = RecursiveCheckBox.IsChecked == true
-            ? _currentNode.DescendantsAndSelf().Skip(1)
-            : _currentNode.Children;
+        IEnumerable<ScanNode> nodes = _currentNode.Children;
         if (!string.IsNullOrWhiteSpace(query))
         {
             nodes = nodes.Where(node =>
@@ -686,11 +1030,6 @@ public sealed partial class MainPage : Page
     private string SortHeader(string label, SortColumn column) => _sortColumn == column
         ? $"{label} {(_sortDescending ? "↓" : "↑")}"
         : label;
-
-    private void RecursiveCheckBox_Changed(object sender, RoutedEventArgs e)
-    {
-        if (_loaded) ApplyFilter();
-    }
 
     private void ChildrenList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -1270,6 +1609,7 @@ public sealed partial class MainPage : Page
         try
         {
             await _fileOperations.RecycleAsync(row.Source.FullPath);
+            _scanCache.Clear();
             ApplyFilter();
             ShowNotification(LocalizationService.Get("Recycled"), InfoBarSeverity.Success);
         }
@@ -1300,6 +1640,7 @@ public sealed partial class MainPage : Page
         try
         {
             await _fileOperations.DeletePermanentlyAsync(row.Source.FullPath);
+            _scanCache.Clear();
             ApplyFilter();
             ShowNotification(LocalizationService.Get("Deleted"), InfoBarSeverity.Warning);
         }
@@ -1445,8 +1786,8 @@ public sealed partial class MainPage : Page
 
     private void ResetResults()
     {
-        DirectoryTree.RootNodes.Clear();
-        _treeNodesByPath.Clear();
+        _treeNodesBeingPopulated.Clear();
+        RebuildDirectoryTree(result: null);
         ChildrenList.ItemsSource = null;
         LargestFilesList.ItemsSource = null;
         ExtensionsList.ItemsSource = null;
@@ -1455,6 +1796,7 @@ public sealed partial class MainPage : Page
         InsightsList.ItemsSource = null;
         ChangesList.ItemsSource = null;
         IssuesList.ItemsSource = null;
+        IssuesTab.Header = LocalizationService.Get("IssuesTabLabel");
         TreemapCanvas.Children.Clear();
         LogicalSizeText.Text = "—";
         AllocatedSizeText.Text = "—";
@@ -1520,6 +1862,9 @@ public sealed partial class MainPage : Page
         if (other > 0) details.Add(LocalizationService.Format("IssueOther", other));
         return LocalizationService.Format("IssueSummary", issues.Count, string.Join(", ", details));
     }
+
+    private static bool IsAccessDeniedIssue(ScanIssue issue) =>
+        issue.ErrorType is nameof(UnauthorizedAccessException) or "SecurityException";
 
     private ContentDialog CreateDialog(
         string title,

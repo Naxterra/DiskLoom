@@ -142,15 +142,28 @@ public sealed class FileSystemScanner
 
                         if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)
                         {
-                            if (!options.FollowReparsePoints)
+                            if (IsCloudPlaceholder(entry.ReparsePointTag))
                             {
-                                continue;
+                                // Cloud Files placeholders are part of the visible folder namespace,
+                                // not links to another location. Enumerating their metadata does not
+                                // require downloading file contents.
+                                if (!visitedTargets.TryAdd(Path.GetFullPath(entry.FullPath), 0))
+                                {
+                                    continue;
+                                }
                             }
-
-                            var target = new DirectoryInfo(entry.FullPath).ResolveLinkTarget(returnFinalTarget: true)?.FullName;
-                            if (string.IsNullOrWhiteSpace(target) || !visitedTargets.TryAdd(Path.GetFullPath(target), 0))
+                            else
                             {
-                                continue;
+                                if (!options.FollowReparsePoints)
+                                {
+                                    continue;
+                                }
+
+                                var target = new DirectoryInfo(entry.FullPath).ResolveLinkTarget(returnFinalTarget: true)?.FullName;
+                                if (string.IsNullOrWhiteSpace(target) || !visitedTargets.TryAdd(Path.GetFullPath(target), 0))
+                                {
+                                    continue;
+                                }
                             }
                         }
 
@@ -251,6 +264,9 @@ public sealed class FileSystemScanner
                 entry.LastWriteTimeUtc,
                 entry.LastAccessTimeUtc,
                 attributes,
+                (attributes & FileAttributes.ReparsePoint) != 0
+                    ? NativeDirectoryReader.GetReparsePointTag(entry.FullName)
+                    : 0,
                 HasNativeAllocation: false);
         }
     }
@@ -278,6 +294,9 @@ public sealed class FileSystemScanner
 
         return false;
     }
+
+    private static bool IsCloudPlaceholder(uint reparsePointTag) =>
+        (reparsePointTag & 0xFFFF0FFFu) == 0x9000001Au;
 
     private static ScanNode CreateDirectoryNode(DirectoryEntryData entry) => new()
     {
@@ -468,6 +487,7 @@ public sealed class FileSystemScanner
         DateTimeOffset LastWriteTimeUtc,
         DateTimeOffset LastAccessTimeUtc,
         FileAttributes Attributes,
+        uint ReparsePointTag,
         bool HasNativeAllocation);
 
     private sealed class ExtensionAccumulator
@@ -485,6 +505,7 @@ public sealed class FileSystemScanner
         private const uint FileShareDelete = 0x00000004;
         private const uint OpenExisting = 3;
         private const uint FileFlagBackupSemantics = 0x02000000;
+        private const uint FileFlagOpenReparsePoint = 0x00200000;
         private const int ErrorNoMoreFiles = 18;
         private const int ErrorHandleEof = 38;
         private const int BufferSize = 256 * 1024;
@@ -566,6 +587,7 @@ public sealed class FileSystemScanner
                                 FromFileTime(Marshal.ReadInt64(current, 24)),
                                 FromFileTime(Marshal.ReadInt64(current, 16)),
                                 attributes,
+                                unchecked((uint)Marshal.ReadInt32(current, 68)),
                                 HasNativeAllocation: true));
                         }
 
@@ -591,6 +613,39 @@ public sealed class FileSystemScanner
             catch
             {
                 return false;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        public static uint GetReparsePointTag(string path)
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                return 0;
+            }
+
+            using var handle = CreateFile(
+                path,
+                0,
+                FileShareRead | FileShareWrite | FileShareDelete,
+                IntPtr.Zero,
+                OpenExisting,
+                FileFlagBackupSemantics | FileFlagOpenReparsePoint,
+                IntPtr.Zero);
+            if (handle.IsInvalid)
+            {
+                return 0;
+            }
+
+            var buffer = Marshal.AllocHGlobal(8);
+            try
+            {
+                return GetFileInformationByHandleEx(handle, FileInfoByHandleClass.FileAttributeTagInfo, buffer, 8)
+                    ? unchecked((uint)Marshal.ReadInt32(buffer, 4))
+                    : 0;
             }
             finally
             {
@@ -630,6 +685,7 @@ public sealed class FileSystemScanner
 
         private enum FileInfoByHandleClass
         {
+            FileAttributeTagInfo = 9,
             FileIdExtdDirectoryInfo = 19,
             FileIdExtdDirectoryRestartInfo = 20
         }

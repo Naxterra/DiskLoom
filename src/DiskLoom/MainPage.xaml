@@ -16,36 +16,38 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <CommandBar DefaultLabelPosition="Right" IsDynamicOverflowEnabled="True" Background="{ThemeResource DiskLoomCommandBarBrush}">
-            <AppBarButton x:Uid="ScanFolderButton" Label="Scan folder" Click="ScanFolder_Click">
-                <AppBarButton.Icon><FontIcon Glyph="&#xE8B7;" /></AppBarButton.Icon>
-            </AppBarButton>
-            <AppBarButton x:Name="CancelButton" x:Uid="CancelButton" Label="Cancel" Click="Cancel_Click" IsEnabled="False">
-                <AppBarButton.Icon><FontIcon Glyph="&#xE711;" /></AppBarButton.Icon>
-            </AppBarButton>
-            <AppBarButton x:Name="RefreshButton" x:Uid="RefreshButton" Label="Rescan" Click="Refresh_Click" IsEnabled="False">
-                <AppBarButton.Icon><FontIcon Glyph="&#xE72C;" /></AppBarButton.Icon>
-            </AppBarButton>
-            <AppBarSeparator />
-            <AppBarButton x:Name="ExportButton" x:Uid="ExportButton" Label="Export" Click="Export_Click" IsEnabled="False">
-                <AppBarButton.Icon><FontIcon Glyph="&#xEDE1;" /></AppBarButton.Icon>
-            </AppBarButton>
-            <AppBarButton x:Name="SaveSnapshotButton" x:Uid="SaveSnapshotButton" Label="Save snapshot" Click="SaveSnapshot_Click" IsEnabled="False">
-                <AppBarButton.Icon><FontIcon Glyph="&#xE74E;" /></AppBarButton.Icon>
-            </AppBarButton>
-            <AppBarButton x:Name="CompareButton" x:Uid="CompareButton" Label="Compare" Click="Compare_Click" IsEnabled="False">
-                <AppBarButton.Icon><FontIcon Glyph="&#xE8AB;" /></AppBarButton.Icon>
-            </AppBarButton>
-            <AppBarSeparator />
-            <AppBarButton x:Uid="CheckUpdatesButton" Label="Check updates" Click="CheckUpdates_Click">
-                <AppBarButton.Icon><FontIcon Glyph="&#xE895;" /></AppBarButton.Icon>
-            </AppBarButton>
-            <CommandBar.SecondaryCommands>
-                <AppBarButton x:Uid="SettingsMenu" Label="Settings" Click="Settings_Click" />
-                <AppBarButton x:Uid="CopyCurrentPathMenu" Label="Copy current path" Click="CopyPath_Click" />
-                <AppBarButton x:Uid="AboutMenu" Label="About DiskLoom" Click="About_Click" />
-            </CommandBar.SecondaryCommands>
-        </CommandBar>
+        <Border Background="{ThemeResource DiskLoomCommandBarBrush}">
+            <CommandBar HorizontalAlignment="Left" DefaultLabelPosition="Right" IsDynamicOverflowEnabled="True" Background="Transparent">
+                <AppBarButton x:Uid="ScanFolderButton" Label="Scan folder" Click="ScanFolder_Click">
+                    <AppBarButton.Icon><FontIcon Glyph="&#xE8B7;" /></AppBarButton.Icon>
+                </AppBarButton>
+                <AppBarButton x:Name="CancelButton" x:Uid="CancelButton" Label="Cancel" Click="Cancel_Click" IsEnabled="False">
+                    <AppBarButton.Icon><FontIcon Glyph="&#xE711;" /></AppBarButton.Icon>
+                </AppBarButton>
+                <AppBarButton x:Name="RefreshButton" x:Uid="RefreshButton" Label="Rescan" Click="Refresh_Click" IsEnabled="False">
+                    <AppBarButton.Icon><FontIcon Glyph="&#xE72C;" /></AppBarButton.Icon>
+                </AppBarButton>
+                <AppBarSeparator />
+                <AppBarButton x:Name="ExportButton" x:Uid="ExportButton" Label="Export" Click="Export_Click" IsEnabled="False">
+                    <AppBarButton.Icon><FontIcon Glyph="&#xEDE1;" /></AppBarButton.Icon>
+                </AppBarButton>
+                <AppBarButton x:Name="SaveSnapshotButton" x:Uid="SaveSnapshotButton" Label="Save snapshot" Click="SaveSnapshot_Click" IsEnabled="False">
+                    <AppBarButton.Icon><FontIcon Glyph="&#xE74E;" /></AppBarButton.Icon>
+                </AppBarButton>
+                <AppBarButton x:Name="CompareButton" x:Uid="CompareButton" Label="Compare" Click="Compare_Click" IsEnabled="False">
+                    <AppBarButton.Icon><FontIcon Glyph="&#xE8AB;" /></AppBarButton.Icon>
+                </AppBarButton>
+                <AppBarSeparator />
+                <AppBarButton x:Uid="CheckUpdatesButton" Label="Check updates" Click="CheckUpdates_Click">
+                    <AppBarButton.Icon><FontIcon Glyph="&#xE895;" /></AppBarButton.Icon>
+                </AppBarButton>
+                <CommandBar.SecondaryCommands>
+                    <AppBarButton x:Uid="SettingsMenu" Label="Settings" Click="Settings_Click" />
+                    <AppBarButton x:Uid="CopyCurrentPathMenu" Label="Copy current path" Click="CopyPath_Click" />
+                    <AppBarButton x:Uid="AboutMenu" Label="About DiskLoom" Click="About_Click" />
+                </CommandBar.SecondaryCommands>
+            </CommandBar>
+        </Border>
 
         <Border Grid.Row="1" Padding="10,6" Background="{ThemeResource DiskLoomTreePaneBrush}" BorderBrush="{ThemeResource DiskLoomNavigationBorderBrush}" BorderThickness="0,1,0,1">
             <Grid ColumnSpacing="8">
@@ -87,9 +89,9 @@
                         </DataTemplate>
                     </ComboBox.ItemTemplate>
                 </ComboBox>
-                <Grid Grid.Column="2">
-                    <TextBox x:Name="PathBox" x:Uid="PathBox" Height="32" PlaceholderText="C:\ or \\server\share" KeyDown="PathBox_KeyDown" />
-                    <BreadcrumbBar x:Name="PathBreadcrumb" MinHeight="32" VerticalAlignment="Center" Visibility="Collapsed" ItemClicked="PathBreadcrumb_ItemClicked" />
+                <Grid Grid.Column="2" VerticalAlignment="Center">
+                    <TextBox x:Name="PathBox" x:Uid="PathBox" Height="32" VerticalAlignment="Center" VerticalContentAlignment="Center" PlaceholderText="C:\ or \\server\share" KeyDown="PathBox_KeyDown" />
+                    <BreadcrumbBar x:Name="PathBreadcrumb" MinHeight="32" VerticalAlignment="Center" VerticalContentAlignment="Center" Visibility="Collapsed" ItemClicked="PathBreadcrumb_ItemClicked" />
                 </Grid>
                 <Button x:Name="EditPathButton" Grid.Column="3" Width="34" Height="32" Style="{StaticResource NavigationButtonStyle}" Visibility="Collapsed" ToolTipService.ToolTip="Edit path" Click="EditPath_Click">
                     <FontIcon Glyph="&#xE70F;" FontSize="13" />
@@ -115,10 +117,19 @@
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <TextBlock x:Uid="FolderTreeHeader" Text="Folder tree" FontSize="15" FontWeight="SemiBold" Foreground="{ThemeResource DiskLoomTealBrush}" VerticalAlignment="Center" />
+                    <TextBlock x:Uid="FolderTreeHeader" Text="Drives and folders" FontSize="15" FontWeight="SemiBold" Foreground="{ThemeResource DiskLoomTealBrush}" VerticalAlignment="Center" />
                     <TextBlock x:Name="TreeCountText" x:Uid="TreeCountText" Grid.Column="1" Text="No scan" Foreground="{ThemeResource DiskLoomBlueBrush}" VerticalAlignment="Center" />
                 </Grid>
-                <TreeView x:Name="DirectoryTree" Grid.Row="1" Margin="0,4,0,0" SelectionMode="Single" SelectionChanged="DirectoryTree_SelectionChanged" Expanding="DirectoryTree_Expanding" ItemInvoked="DirectoryTree_ItemInvoked">
+                <TreeView x:Name="DirectoryTree" Grid.Row="1" Margin="0,4,0,0" SelectionMode="Single" SelectionChanged="DirectoryTree_SelectionChanged" Expanding="DirectoryTree_Expanding" ItemInvoked="DirectoryTree_ItemInvoked" DoubleTapped="DirectoryTree_DoubleTapped" RightTapped="DirectoryTree_RightTapped">
+                    <TreeView.ContextFlyout>
+                        <MenuFlyout x:Name="DirectoryTreeMenu" Opening="DirectoryTreeMenu_Opening">
+                            <MenuFlyoutItem x:Uid="TreeShowInExplorerMenu" Text="Show in File Explorer" Click="TreeShowInExplorer_Click" />
+                            <MenuFlyoutItem x:Uid="TreeCopyPathMenu" Text="Copy path" Click="TreeCopyPath_Click" />
+                            <MenuFlyoutSeparator />
+                            <MenuFlyoutItem x:Name="TreeRecycleMenuItem" x:Uid="TreeRecycleMenu" Text="Move folder to Recycle Bin" Click="TreeRecycle_Click" />
+                            <MenuFlyoutItem x:Name="TreeDeleteMenuItem" x:Uid="TreeDeletePermanentlyMenu" Text="Delete folder permanently…" Click="TreeDeletePermanently_Click" />
+                        </MenuFlyout>
+                    </TreeView.ContextFlyout>
                     <TreeView.ItemTemplate>
                         <DataTemplate>
                             <Grid MinWidth="190" ColumnSpacing="8">
@@ -197,7 +208,6 @@
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="170" />
                                 <ColumnDefinition Width="40" />
-                                <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <TextBox x:Name="FilterBox" x:Uid="FilterBox" PlaceholderText="Filter by name or path" TextChanged="FilterBox_TextChanged">
                                 <TextBox.Header>Results</TextBox.Header>
@@ -210,7 +220,6 @@
                                 <ComboBoxItem x:Uid="SortFileCount" Content="File count" />
                             </ComboBox>
                             <Button x:Name="SortDirectionButton" Grid.Column="2" Width="36" Height="32" Content="↓" FontSize="18" VerticalAlignment="Bottom" Margin="0,0,0,1" ToolTipService.ToolTip="Descending; click to reverse" Click="SortDirectionButton_Click" />
-                            <CheckBox x:Name="RecursiveCheckBox" x:Uid="RecursiveCheckBox" Grid.Column="3" Content="Search subfolders" VerticalAlignment="Bottom" Margin="4,0,0,8" Checked="RecursiveCheckBox_Changed" Unchecked="RecursiveCheckBox_Changed" />
                         </Grid>
 
                         <Grid x:Name="ResultHeaderGrid" Grid.Row="2" Padding="6,2" Background="{ThemeResource DiskLoomResultHeaderBrush}">
@@ -496,7 +505,7 @@
                     </Grid>
                 </TabViewItem>
 
-                <TabViewItem x:Uid="IssuesTab" Header="Issues" IsClosable="False">
+                <TabViewItem x:Name="IssuesTab" x:Uid="IssuesTab" Header="Issues" IsClosable="False">
                     <Grid Padding="8">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
