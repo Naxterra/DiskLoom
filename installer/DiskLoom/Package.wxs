@@ -13,6 +13,7 @@
       Compressed="yes">
 
     <MajorUpgrade
+        AllowSameVersionUpgrades="yes"
         DowngradeErrorMessage="!(loc.DowngradeError)"
         IgnoreLanguage="yes"
         Schedule="afterInstallInitialize" />
@@ -33,6 +34,20 @@
         Sequence="both"
         Condition="UserLanguageID = 1031 OR UserLanguageID = 2055 OR UserLanguageID = 3079 OR UserLanguageID = 4103 OR UserLanguageID = 5127" />
     <SetProperty Id="ARPINSTALLLOCATION" Value="[APPLICATIONFOLDER]" After="CostFinalize" Sequence="execute" />
+    <SetProperty
+        Id="APPLICATIONFOLDER"
+        Action="SetDiskLoomDefaultApplicationFolderUI"
+        Value="[ProgramFiles64Folder][ApplicationFolderName]"
+        After="WixSetPerMachineFolder"
+        Sequence="ui"
+        Condition="ACTION=&quot;INSTALL&quot; AND (ALLUSERS=1 OR (ALLUSERS=2 AND Privileged))" />
+    <SetProperty
+        Id="APPLICATIONFOLDER"
+        Action="SetDiskLoomDefaultApplicationFolderExecute"
+        Value="[ProgramFiles64Folder][ApplicationFolderName]"
+        After="WixSetPerMachineFolder"
+        Sequence="execute"
+        Condition="UILevel &lt; 5 AND ACTION=&quot;INSTALL&quot; AND (ALLUSERS=1 OR (ALLUSERS=2 AND Privileged))" />
 
     <Property Id="ApplicationFolderName" Value="DiskLoom" />
     <Property Id="WixAppFolder" Value="WixPerMachineFolder" />

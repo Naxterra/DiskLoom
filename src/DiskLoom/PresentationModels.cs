@@ -21,11 +21,26 @@ public sealed class FolderTreeRow
         Name = source?.Name ?? FormatName(fullPath);
     }
 
+    public FolderTreeRow(DriveSummary drive, ScanNode? source)
+    {
+        Drive = drive;
+        Source = source;
+        FullPath = drive.Name;
+        Name = drive.DisplayName;
+    }
+
+    public DriveSummary? Drive { get; }
     public ScanNode? Source { get; }
     public string FullPath { get; }
     public string Name { get; }
-    public string Glyph => "\uE8B7";
-    public string PrimarySizeText => Source is null ? "—" : ByteFormatter.Format(Source.Size);
+    public string Glyph => Drive is null ? "\uE8B7" : "\uE7F1";
+    public string PrimarySizeText => Source is not null
+        ? ByteFormatter.Format(Source.Size)
+        : Drive is { IsReady: true }
+            ? ByteFormatter.Format(Drive.UsedBytes)
+            : Drive is null
+                ? "—"
+                : LocalizationService.Get("NotReady");
 
     private static string FormatName(string path)
     {

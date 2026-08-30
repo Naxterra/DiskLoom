@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.1.17 — 2026-08-30
+
+- Enforced one DiskLoom instance with both a fixed application key and an OS-level named mutex shared across installed, portable, localized, renamed, and updated builds.
+- Kept second-launch activation redirection so Explorer scan requests open in the existing window instead of being discarded.
+
+## 0.1.16 — 2026-08-30
+
+- Made a double-click anywhere on a folder-tree row expand or collapse that folder, while retaining the arrow control.
+- Deferred the double-click expansion by one UI dispatcher turn to preserve the TreeView crash fix.
+
+## 0.1.15 — 2026-08-30
+
+- Cached completed scans for the current app session so switching back to a previously scanned drive is immediate.
+- Kept Rescan as the explicit way to refresh a cached drive from disk.
+- Replaced access-denied-only warning banners with a compact Problems tab count and an explanatory message inside that tab.
+- Kept the warning banner for changed, missing, I/O, and other unexpected scan failures.
+- Removed the recursive-results toggle that could materialize hundreds of thousands of rows and freeze the UI; folder navigation remains the fast way to inspect descendants.
+- Vertically centered the editable path and breadcrumb controls with the surrounding navigation toolbar.
+
+## 0.1.14 — 2026-08-30
+
+- Fixed a native WinUI crash when selecting a populated folder such as NextCloud in the left tree.
+- Avoided changing a TreeView node's expansion state from inside its `SelectionChanged` collection update.
+- Deferred drive-triggered scan resets until the originating TreeView or drive-picker event has completed.
+
+## 0.1.13 — 2026-08-30
+
+- Made drive selection start scanning immediately, without requiring a separate click on Scan.
+- Added every detected local drive as a persistent root in the left navigation tree; selecting an unscanned drive starts its scan.
+- Added safe Cloud Files placeholder traversal so Nextcloud and comparable sync roots show their complete metadata without enabling junction or symbolic-link traversal.
+
+## 0.1.12 — 2026-08-29
+
+- Prevented duplicate Apps & Features entries when switching between equal-version English and German MSI packages.
+- Made the upgrade remove all older DiskLoom product registrations in the shared upgrade family.
+- Corrected the x64 default destination from `Program Files (x86)` to `Program Files`, while preserving user-selected paths in the full installer UI.
+- Added a folder-tree context menu for Explorer, copy-path, Recycle Bin, and confirmed permanent-delete actions; drive roots remain protected.
+- Left-aligned the top command bar and removed the large empty leading gap.
+- Prevented re-entrant tree updates from interrupting a scan result, which could omit the final folder (such as NextCloud) and show a collection-modification error.
+
 ## 0.1.11 — 2026-08-26
 
 - Added Back, Forward, and Up folder navigation with clickable path breadcrumbs and direct path editing.

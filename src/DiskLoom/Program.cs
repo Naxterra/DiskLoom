@@ -10,6 +10,8 @@ namespace DiskLoom;
 public static class Program
 {
     private const string InstanceKey = "Naxterra.DiskLoom.Main";
+    private const string SingleInstanceMutexName = "Local\\Naxterra.DiskLoom.SingleInstance";
+    private static Mutex? _singleInstanceMutex;
 
     internal static event EventHandler<AppActivationArguments>? RedirectedActivation;
 
@@ -22,13 +24,78 @@ public static class Program
             return 0;
         }
 
-        Application.Start(_ =>
+        if (!TryAcquireSingleInstanceMutex())
         {
-            var context = new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread());
-            SynchronizationContext.SetSynchronizationContext(context);
-            new App();
-        });
-        return 0;
+            AppInstance.GetCurrent().UnregisterKey();
+            ActivateExistingWindow();
+            return 0;
+        }
+
+        try
+        {
+            Application.Start(_ =>
+            {
+                var context = new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread());
+                SynchronizationContext.SetSynchronizationContext(context);
+                new App();
+            });
+            return 0;
+        }
+        finally
+        {
+            ReleaseSingleInstanceMutex();
+        }
+    }
+
+    private static bool TryAcquireSingleInstanceMutex()
+    {
+        _singleInstanceMutex = new Mutex(initiallyOwned: false, SingleInstanceMutexName);
+        try
+        {
+            return _singleInstanceMutex.WaitOne(0);
+        }
+        catch (AbandonedMutexException)
+        {
+            return true;
+        }
+    }
+
+    private static void ReleaseSingleInstanceMutex()
+    {
+        if (_singleInstanceMutex is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _singleInstanceMutex.ReleaseMutex();
+        }
+        catch (ApplicationException)
+        {
+            // This process did not own the mutex.
+        }
+        finally
+        {
+            _singleInstanceMutex.Dispose();
+            _singleInstanceMutex = null;
+        }
+    }
+
+    private static void ActivateExistingWindow()
+    {
+        var currentProcessId = Environment.ProcessId;
+        foreach (var process in Process.GetProcessesByName("DiskLoom"))
+        {
+            using (process)
+            {
+                if (process.Id != currentProcessId && process.MainWindowHandle != nint.Zero)
+                {
+                    SetForegroundWindow(process.MainWindowHandle);
+                    return;
+                }
+            }
+        }
     }
 
     private static bool RedirectToExistingInstance()
@@ -48,9 +115,17 @@ public static class Program
     private static void OnRedirectedActivation(object? sender, AppActivationArguments args) =>
         RedirectedActivation?.Invoke(sender, args);
 
-    internal static void ReleaseInstanceKeyForRestart() => AppInstance.GetCurrent().UnregisterKey();
+    internal static void ReleaseInstanceKeyForRestart()
+    {
+        AppInstance.GetCurrent().UnregisterKey();
+        ReleaseSingleInstanceMutex();
+    }
 
-    internal static void ReclaimInstanceKeyAfterFailedRestart() => AppInstance.FindOrRegisterForKey(InstanceKey);
+    internal static void ReclaimInstanceKeyAfterFailedRestart()
+    {
+        AppInstance.FindOrRegisterForKey(InstanceKey);
+        _ = TryAcquireSingleInstanceMutex();
+    }
 
     private static void RedirectActivationTo(AppActivationArguments args, AppInstance primaryInstance)
     {

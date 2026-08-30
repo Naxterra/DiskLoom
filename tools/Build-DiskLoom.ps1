@@ -4,7 +4,7 @@ param(
     [ValidateSet('Debug', 'Release')]
     [string]$Configuration = 'Release',
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '0.1.11',
+    [string]$Version = '0.1.17',
     [ValidateSet('win-x64', 'win-arm64')]
     [string]$RuntimeIdentifier = 'win-x64',
     [switch]$Publish,
