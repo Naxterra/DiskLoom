@@ -166,6 +166,13 @@ public sealed class FileSystemScanner
                                 }
                             }
                         }
+                        else if (options.FollowReparsePoints && !visitedTargets.TryAdd(Path.GetFullPath(entry.FullPath), 0))
+                        {
+                            // A previously followed reparse point already claimed this physical
+                            // directory under a different path; skip the duplicate so its contents
+                            // are not scanned (and counted) twice.
+                            continue;
+                        }
 
                         Interlocked.Increment(ref pendingDirectories);
                         if (!writer.TryWrite(child))
