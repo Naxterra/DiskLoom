@@ -38,6 +38,7 @@ public sealed partial class MainPage : Page
     private readonly HashSet<TreeViewNode> _treeNodesBeingPopulated = [];
     private readonly List<ScanNode> _navigationHistory = [];
     private IReadOnlyList<DriveSummary> _drives = [];
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _filterDebounceTimer;
     private CancellationTokenSource? _workCancellation;
     private ScanResult? _scanResult;
     private ScanNode? _currentNode;
@@ -951,7 +952,25 @@ public sealed partial class MainPage : Page
 
     private void FilterBox_TextChanged(object sender, TextChangedEventArgs e)
     {
-        if (_loaded) ApplyFilter();
+        if (!_loaded)
+        {
+            return;
+        }
+
+        // ApplyFilter() verifies each row still exists on disk, which is real I/O.
+        // Debounce so that typing does not run it on every keystroke.
+        _filterDebounceTimer ??= CreateFilterDebounceTimer();
+        _filterDebounceTimer.Stop();
+        _filterDebounceTimer.Start();
+    }
+
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer CreateFilterDebounceTimer()
+    {
+        var timer = DispatcherQueue.CreateTimer();
+        timer.Interval = TimeSpan.FromMilliseconds(200);
+        timer.IsRepeating = false;
+        timer.Tick += (_, _) => ApplyFilter();
+        return timer;
     }
 
     private void SortBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -1334,8 +1353,10 @@ public sealed partial class MainPage : Page
             return;
         }
 
+        // Only cancel the previous operation's token here; disposing it now could race
+        // with that operation still observing the token before it unwinds. Each flow
+        // disposes its own CancellationTokenSource in its own finally block instead.
         _workCancellation?.Cancel();
-        _workCancellation?.Dispose();
         var cancellation = new CancellationTokenSource();
         _workCancellation = cancellation;
         SetBusy(true, LocalizationService.Get("PreparingDuplicates"));

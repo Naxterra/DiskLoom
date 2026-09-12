@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.18 — 2026-09-13
+
+- Fixed followed reparse points (directory junctions/symlinks) double-counting a directory's files and size when the link's target was also reachable through the normal scan tree.
+- Fixed a possible crash when starting a duplicate scan while a previous operation was still unwinding, by no longer disposing its cancellation token early.
+- Debounced the results filter box so it no longer re-verifies every row's existence on disk on each keystroke, keeping large folders responsive while typing.
+
 ## 0.1.17 — 2026-08-30
 
 - Enforced one DiskLoom instance with both a fixed application key and an OS-level named mutex shared across installed, portable, localized, renamed, and updated builds.

@@ -6,7 +6,7 @@
     <Cultures>en-US;de-DE</Cultures>
     <OutputName>DiskLoom-Setup-x64</OutputName>
     <OutputPath>$(MSBuildProjectDirectory)\..\..\artifacts\DiskLoom\installer\</OutputPath>
-    <DiskLoomVersion Condition="'$(DiskLoomVersion)' == ''">0.1.17</DiskLoomVersion>
+    <DiskLoomVersion Condition="'$(DiskLoomVersion)' == ''">0.1.18</DiskLoomVersion>
     <DefineConstants>ProductVersion=$(DiskLoomVersion)</DefineConstants>
     <DefaultCompressionLevel>high</DefaultCompressionLevel>
     <SuppressIces>ICE03;ICE61</SuppressIces>
