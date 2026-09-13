@@ -82,7 +82,7 @@
                 <ComboBox x:Name="DrivePicker" x:Uid="DrivePicker" Grid.Column="1" Height="32" PlaceholderText="Choose a drive" SelectionChanged="DrivePicker_SelectionChanged">
                     <ComboBox.ItemTemplate>
                         <DataTemplate>
-                            <StackPanel>
+                            <StackPanel VerticalAlignment="Center">
                                 <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
                                 <TextBlock Text="{Binding Detail}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             </StackPanel>
@@ -138,7 +138,7 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <FontIcon Glyph="{Binding Content.Glyph}" FontSize="14" Foreground="{ThemeResource DiskLoomCyanBrush}" />
+                                <FontIcon Glyph="{Binding Content.Glyph}" FontSize="14" Foreground="{ThemeResource DiskLoomCyanBrush}" VerticalAlignment="Center" />
                                 <TextBlock Grid.Column="1" Text="{Binding Content.Name}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
                                 <TextBlock Grid.Column="2" Text="{Binding Content.PrimarySizeText}" FontSize="11" Style="{StaticResource MutedTextStyle}" VerticalAlignment="Center" />
                             </Grid>
@@ -252,7 +252,7 @@
                             <Thumb x:Name="ModifiedColumnSplitter" Grid.Column="8" Tag="Modified" Style="{StaticResource ResultColumnSplitterStyle}" DragDelta="ResultColumnSplitter_DragDelta" DoubleTapped="ResultColumnSplitter_DoubleTapped" />
                         </Grid>
 
-                        <ListView x:Name="ChildrenList" Grid.Row="3" SelectionMode="Single" DoubleTapped="ChildrenList_DoubleTapped" SelectionChanged="ChildrenList_SelectionChanged">
+                        <ListView x:Name="ChildrenList" Grid.Row="3" SelectionMode="Extended" DoubleTapped="ChildrenList_DoubleTapped" SelectionChanged="ChildrenList_SelectionChanged">
                             <ListView.ItemContainerStyle>
                                 <Style TargetType="ListViewItem">
                                     <Setter Property="Padding" Value="0" />
@@ -263,6 +263,8 @@
                                 <MenuFlyout>
                                     <MenuFlyoutItem x:Uid="ShowInExplorerMenu" Text="Show in File Explorer" Click="ShowInExplorer_Click" />
                                     <MenuFlyoutItem x:Uid="CopyPathMenu" Text="Copy path" Click="CopySelectedPath_Click" />
+                                    <MenuFlyoutSeparator />
+                                    <MenuFlyoutItem x:Uid="SelectAllMenu" Text="Select all" Click="SelectAllChildren_Click" />
                                     <MenuFlyoutSeparator />
                                     <MenuFlyoutItem x:Uid="RecycleMenu" Text="Move to Recycle Bin" Click="RecycleSelected_Click" />
                                     <MenuFlyoutItem x:Uid="DeletePermanentlyMenu" Text="Delete permanently…" Click="DeleteSelected_Click" />
@@ -282,8 +284,8 @@
                                             <ColumnDefinition Width="{Binding ColumnLayout.ModifiedWidth}" MinWidth="135" />
                                             <ColumnDefinition Width="6" />
                                         </Grid.ColumnDefinitions>
-                                        <FontIcon Glyph="{Binding Glyph}" FontSize="15" Foreground="{ThemeResource DiskLoomBlueBrush}" />
-                                        <StackPanel Grid.Column="1" Margin="0,0,6,0">
+                                        <FontIcon Glyph="{Binding Glyph}" FontSize="15" Foreground="{ThemeResource DiskLoomBlueBrush}" VerticalAlignment="Center" />
+                                        <StackPanel Grid.Column="1" Margin="0,0,6,0" VerticalAlignment="Center">
                                             <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
                                             <TextBlock Text="{Binding CountText}" FontSize="10" Style="{StaticResource MutedTextStyle}" />
                                         </StackPanel>
@@ -328,7 +330,7 @@
                                             <ColumnDefinition Width="120" />
                                             <ColumnDefinition Width="150" />
                                         </Grid.ColumnDefinitions>
-                                        <StackPanel>
+                                        <StackPanel VerticalAlignment="Center">
                                             <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                                             <TextBlock Text="{Binding Path}" FontSize="11" Style="{StaticResource MutedTextStyle}" TextTrimming="CharacterEllipsis" />
                                         </StackPanel>
@@ -363,7 +365,7 @@
                                                 <ColumnDefinition Width="80" />
                                                 <ColumnDefinition Width="80" />
                                             </Grid.ColumnDefinitions>
-                                            <StackPanel>
+                                            <StackPanel VerticalAlignment="Center">
                                                 <TextBlock Text="{Binding Extension}" FontWeight="SemiBold" />
                                                 <ProgressBar Value="{Binding Percentage}" Maximum="100" Height="3" Margin="0,4,0,0" />
                                             </StackPanel>
@@ -389,7 +391,7 @@
                                                 <ColumnDefinition Width="*" />
                                                 <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
-                                            <StackPanel>
+                                            <StackPanel VerticalAlignment="Center">
                                                 <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
                                                 <TextBlock Text="{Binding CountText}" FontSize="11" Style="{StaticResource MutedTextStyle}" />
                                             </StackPanel>
@@ -432,10 +434,10 @@
                                             <ColumnDefinition Width="110" />
                                             <ColumnDefinition Width="140" />
                                         </Grid.ColumnDefinitions>
-                                        <TextBlock Text="{Binding GroupText}" FontWeight="SemiBold" />
-                                        <TextBlock Grid.Column="1" Text="{Binding Path}" TextTrimming="CharacterEllipsis" />
-                                        <TextBlock Grid.Column="2" Text="{Binding SizeText}" HorizontalAlignment="Right" />
-                                        <TextBlock Grid.Column="3" Text="{Binding ModifiedText}" HorizontalAlignment="Right" />
+                                        <TextBlock Text="{Binding GroupText}" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1" Text="{Binding Path}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="2" Text="{Binding SizeText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="3" Text="{Binding ModifiedText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
                                     </Grid>
                                 </DataTemplate>
                             </ListView.ItemTemplate>
@@ -460,8 +462,8 @@
                                                 <ColumnDefinition Width="*" />
                                                 <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
-                                            <FontIcon Glyph="{Binding Glyph}" FontSize="22" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
-                                            <StackPanel Grid.Column="1">
+                                            <FontIcon Glyph="{Binding Glyph}" FontSize="22" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Center" />
+                                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
                                                 <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
                                                 <TextBlock Text="{Binding Description}" Style="{StaticResource MutedTextStyle}" />
                                                 <TextBlock Text="{Binding Path}" FontSize="11" Style="{StaticResource MutedTextStyle}" TextTrimming="CharacterEllipsis" />
@@ -493,11 +495,11 @@
                                             <ColumnDefinition Width="105" />
                                             <ColumnDefinition Width="105" />
                                         </Grid.ColumnDefinitions>
-                                        <TextBlock Text="{Binding Kind}" FontWeight="SemiBold" />
-                                        <TextBlock Grid.Column="1" Text="{Binding Path}" TextTrimming="CharacterEllipsis" />
-                                        <TextBlock Grid.Column="2" Text="{Binding OldSize}" HorizontalAlignment="Right" />
-                                        <TextBlock Grid.Column="3" Text="{Binding NewSize}" HorizontalAlignment="Right" />
-                                        <TextBlock Grid.Column="4" Text="{Binding Delta}" HorizontalAlignment="Right" FontWeight="SemiBold" />
+                                        <TextBlock Text="{Binding Kind}" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1" Text="{Binding Path}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="2" Text="{Binding OldSize}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="3" Text="{Binding NewSize}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="4" Text="{Binding Delta}" HorizontalAlignment="Right" FontWeight="SemiBold" VerticalAlignment="Center" />
                                     </Grid>
                                 </DataTemplate>
                             </ListView.ItemTemplate>
@@ -542,9 +544,9 @@
                                             <ColumnDefinition Width="2*" />
                                             <ColumnDefinition Width="3*" />
                                         </Grid.ColumnDefinitions>
-                                        <TextBlock Text="{Binding Type}" FontWeight="SemiBold" />
-                                        <TextBlock Grid.Column="1" Text="{Binding Path}" TextTrimming="CharacterEllipsis" />
-                                        <TextBlock Grid.Column="2" Text="{Binding Message}" TextWrapping="Wrap" />
+                                        <TextBlock Text="{Binding Type}" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1" Text="{Binding Path}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="2" Text="{Binding Message}" TextWrapping="Wrap" VerticalAlignment="Center" />
                                     </Grid>
                                 </DataTemplate>
                             </ListView.ItemTemplate>

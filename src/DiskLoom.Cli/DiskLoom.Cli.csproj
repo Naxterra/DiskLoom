@@ -6,7 +6,7 @@
     <AssemblyName>DiskLoom.Cli</AssemblyName>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Version>0.1.18</Version>
+    <Version>0.1.19</Version>
     <RepositoryUrl>https://github.com/Naxterra/DiskLoom</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageProjectUrl>https://github.com/Naxterra/DiskLoom</PackageProjectUrl>
