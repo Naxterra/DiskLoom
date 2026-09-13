@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.19 — 2026-09-13
+
+- Enabled multi-select (Ctrl-click, Shift-click, and a Select all command) in the results list, and made Recycle/Delete/Copy path act on every selected item.
+- Fixed vertical text alignment across every list in the app (results, largest files, extensions, ages, duplicates, insights, changes, issues, and the drive/folder pickers) — row content was pinned to the top of the row instead of centered.
+
 ## 0.1.18 — 2026-09-13
 
 - Fixed followed reparse points (directory junctions/symlinks) double-counting a directory's files and size when the link's target was also reachable through the normal scan tree.

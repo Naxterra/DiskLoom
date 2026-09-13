@@ -1545,6 +1545,9 @@ public sealed partial class MainPage : Page
 
     private void ShowInExplorer_Click(object sender, RoutedEventArgs e)
     {
+        // Explorer can only be told to reveal one selection at a time; use the
+        // first selected row so the action still does something useful when
+        // several items are selected.
         if (ChildrenList.SelectedItem is NodeRow row)
         {
             _fileOperations.ShowInExplorer(row.Source.FullPath);
@@ -1553,11 +1556,16 @@ public sealed partial class MainPage : Page
 
     private void CopySelectedPath_Click(object sender, RoutedEventArgs e)
     {
-        if (ChildrenList.SelectedItem is NodeRow row)
+        var paths = GetSelectedChildRows().Select(static row => row.Source.FullPath).ToArray();
+        if (paths.Length > 0)
         {
-            CopyText(row.Source.FullPath);
+            CopyText(string.Join(Environment.NewLine, paths));
         }
     }
+
+    private void SelectAllChildren_Click(object sender, RoutedEventArgs e) => ChildrenList.SelectAll();
+
+    private IReadOnlyList<NodeRow> GetSelectedChildRows() => ChildrenList.SelectedItems.OfType<NodeRow>().ToArray();
 
     private void CopyPath_Click(object sender, RoutedEventArgs e) => CopyText(_currentNode?.FullPath ?? PathBox.Text);
 
@@ -1611,14 +1619,15 @@ public sealed partial class MainPage : Page
 
     private async void RecycleSelected_Click(object sender, RoutedEventArgs e)
     {
-        if (ChildrenList.SelectedItem is not NodeRow row)
+        var rows = GetSelectedChildRows();
+        if (rows.Count == 0)
         {
             return;
         }
 
         var dialog = CreateDialog(
             LocalizationService.Get("RecycleTitle"),
-            row.Source.FullPath,
+            rows.Count == 1 ? rows[0].Source.FullPath : LocalizationService.Format("MultipleItemsSummary", rows.Count),
             LocalizationService.Get("Recycle"),
             LocalizationService.Get("Cancel"),
             ContentDialogButton.Close);
@@ -1627,29 +1636,46 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        try
+        var failures = 0;
+        foreach (var row in rows)
         {
-            await _fileOperations.RecycleAsync(row.Source.FullPath);
-            _scanCache.Clear();
-            ApplyFilter();
-            ShowNotification(LocalizationService.Get("Recycled"), InfoBarSeverity.Success);
+            try
+            {
+                await _fileOperations.RecycleAsync(row.Source.FullPath);
+            }
+            catch
+            {
+                failures++;
+            }
         }
-        catch (Exception exception)
+
+        _scanCache.Clear();
+        ApplyFilter();
+        if (failures == 0)
         {
-            ShowNotification(exception.Message, InfoBarSeverity.Error);
+            ShowNotification(
+                rows.Count == 1 ? LocalizationService.Get("Recycled") : LocalizationService.Format("RecycledMultiple", rows.Count),
+                InfoBarSeverity.Success);
+        }
+        else
+        {
+            ShowNotification(LocalizationService.Format("RecycleFailedSummary", failures, rows.Count), InfoBarSeverity.Warning);
         }
     }
 
     private async void DeleteSelected_Click(object sender, RoutedEventArgs e)
     {
-        if (ChildrenList.SelectedItem is not NodeRow row)
+        var rows = GetSelectedChildRows();
+        if (rows.Count == 0)
         {
             return;
         }
 
         var dialog = CreateDialog(
             LocalizationService.Get("DeleteTitle"),
-            LocalizationService.Format("DeleteWarning", row.Source.FullPath),
+            LocalizationService.Format(
+                "DeleteWarning",
+                rows.Count == 1 ? rows[0].Source.FullPath : LocalizationService.Format("MultipleItemsSummary", rows.Count)),
             LocalizationService.Get("DeletePermanently"),
             LocalizationService.Get("Cancel"),
             ContentDialogButton.Close);
@@ -1658,16 +1684,30 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        try
+        var failures = 0;
+        foreach (var row in rows)
         {
-            await _fileOperations.DeletePermanentlyAsync(row.Source.FullPath);
-            _scanCache.Clear();
-            ApplyFilter();
-            ShowNotification(LocalizationService.Get("Deleted"), InfoBarSeverity.Warning);
+            try
+            {
+                await _fileOperations.DeletePermanentlyAsync(row.Source.FullPath);
+            }
+            catch
+            {
+                failures++;
+            }
         }
-        catch (Exception exception)
+
+        _scanCache.Clear();
+        ApplyFilter();
+        if (failures == 0)
         {
-            ShowNotification(exception.Message, InfoBarSeverity.Error);
+            ShowNotification(
+                rows.Count == 1 ? LocalizationService.Get("Deleted") : LocalizationService.Format("DeletedMultiple", rows.Count),
+                InfoBarSeverity.Warning);
+        }
+        else
+        {
+            ShowNotification(LocalizationService.Format("DeleteFailedSummary", failures, rows.Count), InfoBarSeverity.Error);
         }
     }
 
