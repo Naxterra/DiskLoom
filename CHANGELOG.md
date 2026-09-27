@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.20 — 2026-09-27
+
+- Added a right-click menu to the results, largest files, insights and duplicates lists: Open, Show in File Explorer, Copy path, Properties, Select all, Move to Recycle Bin and Delete permanently. All four lists support Ctrl/Shift multi-select, and deleted items disappear from every list.
+- Fixed the context menu acting on the previously selected row instead of the row that was right-clicked; right-clicking an unselected row now selects it first, as in Explorer.
+- Summary insights (temporary and empty files) and drive roots can no longer be deleted from a context menu.
+- Fixed drive-root snapshots storing paths relative to the app's working directory, which made Compare report false changes. Drive-root snapshots saved by 0.1.19 or earlier are rejected with an explanation; save a new one.
+- Fixed files on different volumes being treated as hard links of each other (and missed by the duplicate finder) when a scan spans volumes.
+- Fixed JSON export failing for folders nested 31 or more levels deep.
+- The drive picker now shows one line (name and free space) with full details in a tooltip instead of a clipped second line; the path breadcrumb is vertically centered.
+- Opening a large folder no longer checks every entry on disk (37,000 entries: 4.3 s → 7 ms).
+- Saving and comparing snapshots is about 20× faster and, like export, no longer blocks the window.
+- Less work on the UI thread after each scan: only folders are indexed, and the largest-files list and insights are computed in the background.
+- Duplicate-search progress updates are rate-limited.
+
 ## 0.1.19 — 2026-09-13
 
 - Enabled multi-select (Ctrl-click, Shift-click, and a Select all command) in the results list, and made Recycle/Delete/Copy path act on every selected item.

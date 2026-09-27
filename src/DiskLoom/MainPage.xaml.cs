@@ -33,7 +33,8 @@ public sealed partial class MainPage : Page
     private readonly UpdateService _updateService = new();
     private readonly Dictionary<string, ScanNode> _nodesByPath = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, ScanNode?> _parentsByPath = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, ScanResult> _scanCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, ScanPresentation> _scanCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _deletedPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, TreeViewNode> _treeNodesByPath = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<TreeViewNode> _treeNodesBeingPopulated = [];
     private readonly List<ScanNode> _navigationHistory = [];
@@ -43,6 +44,7 @@ public sealed partial class MainPage : Page
     private ScanResult? _scanResult;
     private ScanNode? _currentNode;
     private FolderTreeRow? _treeContextRow;
+    private ListView? _fileMenuList;
     private bool _loaded;
     private SortColumn _sortColumn = SortColumn.Size;
     private bool _sortDescending = true;
@@ -60,6 +62,10 @@ public sealed partial class MainPage : Page
     public MainPage()
     {
         InitializeComponent();
+        foreach (var list in new[] { ChildrenList, LargestFilesList, InsightsList, DuplicatesList })
+        {
+            list.ContextFlyout = FileActionsMenu;
+        }
     }
 
     private async void Page_Loaded(object sender, RoutedEventArgs e)
@@ -227,14 +233,15 @@ public sealed partial class MainPage : Page
                 Parallelism = Math.Clamp(Environment.ProcessorCount, 2, 32),
                 FollowReparsePoints = false
             }, progress, cancellation.Token);
+            var presentation = await Task.Run(() => CreatePresentation(result), cancellation.Token);
 
             if (cancellation.IsCancellationRequested || requestId != Volatile.Read(ref _scanRequestId))
             {
                 return;
             }
 
-            _scanCache[path] = result;
-            ActivateScanResult(result, loadedFromCache: false);
+            _scanCache[path] = presentation;
+            ActivateScanResult(presentation, loadedFromCache: false);
         }
         catch (OperationCanceledException)
         {
@@ -264,14 +271,23 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private void ActivateScanResult(ScanResult result, bool loadedFromCache)
+    private ScanPresentation CreatePresentation(ScanResult result) => new(
+        result,
+        result.Root.Files()
+            .OrderByDescending(static file => GetMeasure(file, DisplayAllocatedMeasurements))
+            .Take(1000)
+            .ToArray(),
+        _insightService.Analyze(result));
+
+    private void ActivateScanResult(ScanPresentation presentation, bool loadedFromCache)
     {
+        var result = presentation.Result;
         _scanResult = result;
         _nodesByPath.Clear();
         _parentsByPath.Clear();
         IndexScanNodes(result.Root, parent: null);
 
-        PopulateScan(result);
+        PopulateScan(presentation);
         ShowNode(result.Root);
         StatusText.Text = loadedFromCache
             ? LocalizationService.Format("CachedScanLoaded", result.Root.FullPath)
@@ -288,20 +304,18 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private void PopulateScan(ScanResult result)
+    private void PopulateScan(ScanPresentation presentation)
     {
+        var result = presentation.Result;
         RebuildDirectoryTree(result);
         TreeCountText.Text = $"{result.Root.FolderCount + 1:N0}";
 
-        const bool displayAllocated = DisplayAllocatedMeasurements;
-        LargestFilesList.ItemsSource = result.Root.Files()
-            .OrderByDescending(file => GetMeasure(file, displayAllocated))
-            .Take(1000)
-            .Select(file => new NodeRow(file, displayAllocated))
+        LargestFilesList.ItemsSource = presentation.LargestFiles
+            .Select(static file => new NodeRow(file, DisplayAllocatedMeasurements))
             .ToArray();
         ExtensionsList.ItemsSource = result.Extensions.Take(500).Select(static item => new ExtensionRow(item)).ToArray();
         AgeList.ItemsSource = result.Ages.Select(static item => new AgeRow(item)).ToArray();
-        InsightsList.ItemsSource = _insightService.Analyze(result).Select(static item => new InsightRow(item)).ToArray();
+        InsightsList.ItemsSource = presentation.Insights.Select(static item => new InsightRow(item)).ToArray();
         IssuesList.ItemsSource = result.Issues.Select(static item => new IssueRow(item)).ToArray();
         var accessDeniedCount = result.Issues.Count(IsAccessDeniedIssue);
         var otherIssueCount = result.Issues.Count - accessDeniedCount;
@@ -712,6 +726,7 @@ public sealed partial class MainPage : Page
         UpButton.IsEnabled = _currentNode is not null && GetParentPath(_currentNode.FullPath) is not null;
     }
 
+    // Only folders are ever looked up by path (tree, breadcrumb, Up); files are ~80% of nodes.
     private void IndexScanNodes(ScanNode node, ScanNode? parent)
     {
         var stack = new Stack<(ScanNode Node, ScanNode? Parent)>();
@@ -720,9 +735,12 @@ public sealed partial class MainPage : Page
         {
             _nodesByPath[entry.Node.FullPath] = entry.Node;
             _parentsByPath[entry.Node.FullPath] = entry.Parent;
-            for (var index = entry.Node.Children.Count - 1; index >= 0; index--)
+            foreach (var child in entry.Node.Children)
             {
-                stack.Push((entry.Node.Children[index], entry.Node));
+                if (child.IsDirectory)
+                {
+                    stack.Push((child, entry.Node));
+                }
             }
         }
     }
@@ -925,7 +943,7 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        if (_currentNode is null)
+        if (_currentNode is null || IsDeletedByApp(_currentNode))
         {
             ChildrenList.ItemsSource = null;
             return;
@@ -942,12 +960,27 @@ public sealed partial class MainPage : Page
 
         nodes = SortNodes(nodes);
 
+        // Hide items this session deleted; a per-row disk check froze the UI for seconds in large folders.
         const bool displayAllocated = DisplayAllocatedMeasurements;
         ChildrenList.ItemsSource = nodes
-            .Where(static node => node.IsDirectory ? Directory.Exists(node.FullPath) : File.Exists(node.FullPath))
+            .Where(node => !_deletedPaths.Contains(node.FullPath))
             .Take(100_000)
             .Select(node => new NodeRow(node, displayAllocated, ResultColumns))
             .ToArray();
+    }
+
+    private bool IsDeletedByApp(ScanNode node)
+    {
+        ScanNode? current = node;
+        while (current is not null && _deletedPaths.Count > 0)
+        {
+            if (_deletedPaths.Contains(current.FullPath))
+            {
+                return true;
+            }
+            _parentsByPath.TryGetValue(current.FullPath, out current);
+        }
+        return false;
     }
 
     private void FilterBox_TextChanged(object sender, TextChangedEventArgs e)
@@ -1422,7 +1455,7 @@ public sealed partial class MainPage : Page
 
     private async void Export_Click(object sender, RoutedEventArgs e)
     {
-        if (_scanResult is null)
+        if (_scanResult is not { } result)
         {
             return;
         }
@@ -1430,7 +1463,7 @@ public sealed partial class MainPage : Page
         var picker = new FileSavePicker
         {
             SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
-            SuggestedFileName = $"DiskLoom-{SanitizeFileName(_scanResult.Root.Name)}-{DateTime.Now:yyyyMMdd-HHmm}"
+            SuggestedFileName = $"DiskLoom-{SanitizeFileName(result.Root.Name)}-{DateTime.Now:yyyyMMdd-HHmm}"
         };
         picker.FileTypeChoices.Add(LocalizationService.Get("FileCsv"), [".csv"]);
         picker.FileTypeChoices.Add(LocalizationService.Get("FileJson"), [".json"]);
@@ -1444,13 +1477,14 @@ public sealed partial class MainPage : Page
         try
         {
             SetBusy(true, LocalizationService.Get("Exporting"));
+            var path = file.Path;
             if (file.FileType.Equals(".json", StringComparison.OrdinalIgnoreCase))
             {
-                await _exportService.ExportJsonAsync(_scanResult, file.Path);
+                await Task.Run(() => _exportService.ExportJsonAsync(result, path));
             }
             else
             {
-                await _exportService.ExportCsvAsync(_scanResult, file.Path);
+                await Task.Run(() => _exportService.ExportCsvAsync(result, path));
             }
             StatusText.Text = LocalizationService.Format("ExportedTo", file.Path);
             StatusDetailText.Text = string.Empty;
@@ -1467,7 +1501,7 @@ public sealed partial class MainPage : Page
 
     private async void SaveSnapshot_Click(object sender, RoutedEventArgs e)
     {
-        if (_scanResult is null)
+        if (_scanResult is not { } result)
         {
             return;
         }
@@ -1475,7 +1509,7 @@ public sealed partial class MainPage : Page
         var picker = new FileSavePicker
         {
             SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
-            SuggestedFileName = $"DiskLoom-{SanitizeFileName(_scanResult.Root.Name)}-{DateTime.Now:yyyyMMdd-HHmm}"
+            SuggestedFileName = $"DiskLoom-{SanitizeFileName(result.Root.Name)}-{DateTime.Now:yyyyMMdd-HHmm}"
         };
         picker.FileTypeChoices.Add(LocalizationService.Get("FileSnapshot"), [".diskloom"]);
         WinRT.Interop.InitializeWithWindow.Initialize(picker, App.WindowHandle);
@@ -1488,7 +1522,8 @@ public sealed partial class MainPage : Page
         try
         {
             SetBusy(true, LocalizationService.Get("SavingSnapshot"));
-            await _snapshotService.SaveAsync(_scanResult, file.Path);
+            var path = file.Path;
+            await Task.Run(() => _snapshotService.SaveAsync(result, path));
             StatusText.Text = LocalizationService.Format("SnapshotSaved", file.Path);
         }
         catch (Exception exception)
@@ -1503,7 +1538,7 @@ public sealed partial class MainPage : Page
 
     private async void Compare_Click(object sender, RoutedEventArgs e)
     {
-        if (_scanResult is null)
+        if (_scanResult is not { } result)
         {
             return;
         }
@@ -1524,9 +1559,12 @@ public sealed partial class MainPage : Page
         try
         {
             SetBusy(true, LocalizationService.Get("ComparingSnapshots"));
-            var older = await _snapshotService.LoadAsync(file.Path);
-            var current = _snapshotService.Create(_scanResult);
-            var changes = _snapshotService.Compare(older, current);
+            var path = file.Path;
+            var (older, changes) = await Task.Run(async () =>
+            {
+                var loaded = await _snapshotService.LoadAsync(path);
+                return (loaded, _snapshotService.Compare(loaded, _snapshotService.Create(result)));
+            });
             ChangesList.ItemsSource = changes.Select(static change => new ChangeRow(change)).ToArray();
             ChangesHeaderText.Text = LocalizationService.Format("ChangesSince", changes.Count, older.CreatedUtc.LocalDateTime, older.RootPath);
             WorkspaceTabs.SelectedIndex = 6;
@@ -1543,29 +1581,116 @@ public sealed partial class MainPage : Page
         }
     }
 
+    private void FileActionsMenu_Opening(object sender, object e)
+    {
+        // The flyout opens on the row that was right-clicked, not on the ListView itself.
+        var target = (sender as FlyoutBase)?.Target;
+        _fileMenuList = FindVisualParent<ListView>(target);
+
+        // Explorer-style: right-clicking a row outside the selection acts on that row alone,
+        // so the menu can never delete a different item than the one under the pointer.
+        if (_fileMenuList is not null &&
+            FindVisualParent<ListViewItem>(target) is { } container &&
+            _fileMenuList.ItemFromContainer(container) is { } item &&
+            !_fileMenuList.SelectedItems.Contains(item))
+        {
+            _fileMenuList.SelectedItems.Clear();
+            _fileMenuList.SelectedItems.Add(item);
+        }
+
+        var targets = GetMenuTargets();
+        FileOpenMenuItem.IsEnabled = targets.Count == 1;
+        FilePropertiesMenuItem.IsEnabled = targets.Count == 1;
+        var canDelete = targets.Count > 0 && targets.All(CanDeleteTarget);
+        FileRecycleMenuItem.IsEnabled = canDelete;
+        FileDeleteMenuItem.IsEnabled = canDelete;
+    }
+
+    // Selected rows in display order (SelectedItems is in click order).
+    private IReadOnlyList<IFileActionRow> GetMenuTargets()
+    {
+        if (_fileMenuList?.ItemsSource is not IEnumerable<IFileActionRow> rows)
+        {
+            return Array.Empty<IFileActionRow>();
+        }
+
+        var selected = _fileMenuList.SelectedItems.ToHashSet();
+        return rows.Where(selected.Contains).ToArray();
+    }
+
+    private static bool CanDeleteTarget(IFileActionRow row)
+    {
+        var root = Path.GetPathRoot(row.Path);
+        return row.CanDelete && !PathsEqual(row.Path, root);
+    }
+
+    private void OpenSelected_Click(object sender, RoutedEventArgs e)
+    {
+        if (GetMenuTargets() is [var row])
+        {
+            try
+            {
+                _fileOperations.Open(row.Path);
+            }
+            catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or FileNotFoundException)
+            {
+                ShowNotification(exception.Message, InfoBarSeverity.Error);
+            }
+        }
+    }
+
     private void ShowInExplorer_Click(object sender, RoutedEventArgs e)
     {
-        // Explorer can only be told to reveal one selection at a time; use the
-        // first selected row so the action still does something useful when
-        // several items are selected.
-        if (ChildrenList.SelectedItem is NodeRow row)
+        // Explorer reveals one item per call, so use the first selected row.
+        if (GetMenuTargets() is [var row, ..])
         {
-            _fileOperations.ShowInExplorer(row.Source.FullPath);
+            _fileOperations.ShowInExplorer(row.Path);
         }
     }
 
     private void CopySelectedPath_Click(object sender, RoutedEventArgs e)
     {
-        var paths = GetSelectedChildRows().Select(static row => row.Source.FullPath).ToArray();
+        var paths = GetMenuTargets().Select(static row => row.Path).ToArray();
         if (paths.Length > 0)
         {
             CopyText(string.Join(Environment.NewLine, paths));
         }
     }
 
-    private void SelectAllChildren_Click(object sender, RoutedEventArgs e) => ChildrenList.SelectAll();
+    private void ShowProperties_Click(object sender, RoutedEventArgs e)
+    {
+        if (GetMenuTargets() is [var row] && !_fileOperations.ShowProperties(App.WindowHandle, row.Path))
+        {
+            ShowNotification(LocalizationService.Format("PropertiesFailed", row.Path), InfoBarSeverity.Error);
+        }
+    }
 
-    private IReadOnlyList<NodeRow> GetSelectedChildRows() => ChildrenList.SelectedItems.OfType<NodeRow>().ToArray();
+    private void SelectAll_Click(object sender, RoutedEventArgs e) => _fileMenuList?.SelectAll();
+
+    // Removes rows this session deleted (or that lived inside a deleted folder) from every file list.
+    private void RefreshListsAfterDeletion()
+    {
+        ApplyFilter();
+        LargestFilesList.ItemsSource = WithoutDeleted(LargestFilesList.ItemsSource as IEnumerable<NodeRow>);
+        InsightsList.ItemsSource = WithoutDeleted(InsightsList.ItemsSource as IEnumerable<InsightRow>);
+        DuplicatesList.ItemsSource = WithoutDeleted(DuplicatesList.ItemsSource as IEnumerable<DuplicateRow>);
+    }
+
+    private T[]? WithoutDeleted<T>(IEnumerable<T>? rows) where T : IFileActionRow =>
+        rows?.Where(row => !IsDeletedPath(row.Path)).ToArray();
+
+    private bool IsDeletedPath(string path)
+    {
+        foreach (var deleted in _deletedPaths)
+        {
+            if (path.StartsWith(deleted, StringComparison.OrdinalIgnoreCase) &&
+                (path.Length == deleted.Length || path[deleted.Length] is '\\' or '/'))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 
     private void CopyPath_Click(object sender, RoutedEventArgs e) => CopyText(_currentNode?.FullPath ?? PathBox.Text);
 
@@ -1617,20 +1742,32 @@ public sealed partial class MainPage : Page
         WorkspaceTabs.SelectedIndex = _lastNonIssuesTab is >= 0 and < 7 ? _lastNonIssuesTab : 0;
     }
 
-    private async void RecycleSelected_Click(object sender, RoutedEventArgs e)
+    private async void RecycleSelected_Click(object sender, RoutedEventArgs e) => await DeleteMenuTargetsAsync(permanently: false);
+
+    private async void DeleteSelected_Click(object sender, RoutedEventArgs e) => await DeleteMenuTargetsAsync(permanently: true);
+
+    private async Task DeleteMenuTargetsAsync(bool permanently)
     {
-        var rows = GetSelectedChildRows();
-        if (rows.Count == 0)
+        var rows = GetMenuTargets();
+        if (rows.Count == 0 || !rows.All(CanDeleteTarget))
         {
             return;
         }
 
-        var dialog = CreateDialog(
-            LocalizationService.Get("RecycleTitle"),
-            rows.Count == 1 ? rows[0].Source.FullPath : LocalizationService.Format("MultipleItemsSummary", rows.Count),
-            LocalizationService.Get("Recycle"),
-            LocalizationService.Get("Cancel"),
-            ContentDialogButton.Close);
+        var subject = rows.Count == 1 ? rows[0].Path : LocalizationService.Format("MultipleItemsSummary", rows.Count);
+        var dialog = permanently
+            ? CreateDialog(
+                LocalizationService.Get("DeleteTitle"),
+                LocalizationService.Format("DeleteWarning", subject),
+                LocalizationService.Get("DeletePermanently"),
+                LocalizationService.Get("Cancel"),
+                ContentDialogButton.Close)
+            : CreateDialog(
+                LocalizationService.Get("RecycleTitle"),
+                subject,
+                LocalizationService.Get("Recycle"),
+                LocalizationService.Get("Cancel"),
+                ContentDialogButton.Close);
         if (await dialog.ShowAsync() != ContentDialogResult.Primary)
         {
             return;
@@ -1641,7 +1778,15 @@ public sealed partial class MainPage : Page
         {
             try
             {
-                await _fileOperations.RecycleAsync(row.Source.FullPath);
+                if (permanently)
+                {
+                    await _fileOperations.DeletePermanentlyAsync(row.Path);
+                }
+                else
+                {
+                    await _fileOperations.RecycleAsync(row.Path);
+                }
+                _deletedPaths.Add(row.Path);
             }
             catch
             {
@@ -1650,64 +1795,20 @@ public sealed partial class MainPage : Page
         }
 
         _scanCache.Clear();
-        ApplyFilter();
-        if (failures == 0)
+        RefreshListsAfterDeletion();
+        if (failures > 0)
         {
             ShowNotification(
-                rows.Count == 1 ? LocalizationService.Get("Recycled") : LocalizationService.Format("RecycledMultiple", rows.Count),
-                InfoBarSeverity.Success);
+                LocalizationService.Format(permanently ? "DeleteFailedSummary" : "RecycleFailedSummary", failures, rows.Count),
+                permanently ? InfoBarSeverity.Error : InfoBarSeverity.Warning);
         }
         else
         {
-            ShowNotification(LocalizationService.Format("RecycleFailedSummary", failures, rows.Count), InfoBarSeverity.Warning);
-        }
-    }
-
-    private async void DeleteSelected_Click(object sender, RoutedEventArgs e)
-    {
-        var rows = GetSelectedChildRows();
-        if (rows.Count == 0)
-        {
-            return;
-        }
-
-        var dialog = CreateDialog(
-            LocalizationService.Get("DeleteTitle"),
-            LocalizationService.Format(
-                "DeleteWarning",
-                rows.Count == 1 ? rows[0].Source.FullPath : LocalizationService.Format("MultipleItemsSummary", rows.Count)),
-            LocalizationService.Get("DeletePermanently"),
-            LocalizationService.Get("Cancel"),
-            ContentDialogButton.Close);
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
-        {
-            return;
-        }
-
-        var failures = 0;
-        foreach (var row in rows)
-        {
-            try
-            {
-                await _fileOperations.DeletePermanentlyAsync(row.Source.FullPath);
-            }
-            catch
-            {
-                failures++;
-            }
-        }
-
-        _scanCache.Clear();
-        ApplyFilter();
-        if (failures == 0)
-        {
             ShowNotification(
-                rows.Count == 1 ? LocalizationService.Get("Deleted") : LocalizationService.Format("DeletedMultiple", rows.Count),
-                InfoBarSeverity.Warning);
-        }
-        else
-        {
-            ShowNotification(LocalizationService.Format("DeleteFailedSummary", failures, rows.Count), InfoBarSeverity.Error);
+                rows.Count == 1
+                    ? LocalizationService.Get(permanently ? "Deleted" : "Recycled")
+                    : LocalizationService.Format(permanently ? "DeletedMultiple" : "RecycledMultiple", rows.Count),
+                permanently ? InfoBarSeverity.Warning : InfoBarSeverity.Success);
         }
     }
 
@@ -1868,6 +1969,7 @@ public sealed partial class MainPage : Page
         _currentNode = null;
         _nodesByPath.Clear();
         _parentsByPath.Clear();
+        _deletedPaths.Clear();
         _navigationHistory.Clear();
         _navigationIndex = -1;
         RefreshButton.IsEnabled = false;
@@ -2098,6 +2200,7 @@ public sealed partial class MainPage : Page
         "DiskLoom",
         "last-update-check.txt");
 
+    private sealed record ScanPresentation(ScanResult Result, IReadOnlyList<ScanNode> LargestFiles, IReadOnlyList<StorageInsight> Insights);
     private sealed record AreaItem(ScanNode Node, double Area);
     private readonly record struct LayoutRect(double X, double Y, double Width, double Height);
     private sealed record TreemapTile(ScanNode Node, double X, double Y, double Width, double Height);

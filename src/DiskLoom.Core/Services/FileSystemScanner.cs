@@ -186,7 +186,7 @@ public sealed class FileSystemScanner
                         var storage = !options.CalculateAllocatedSize
                             ? new FileStorageInfo(size, 0, 0, 1)
                             : entry.HasNativeAllocation
-                                ? new FileStorageInfo(entry.AllocationSize, 0, entry.FileId, 1)
+                                ? new FileStorageInfo(entry.AllocationSize, entry.VolumeSerialNumber, entry.FileId, 1)
                                 : options.PreciseAllocationSize
                                     ? NativeFileSize.GetStorageInfo(entry.FullPath, size)
                                     : NativeFileSize.GetFastStorageInfo(entry.FullPath, size, entry.Attributes, allocationUnitSize);
@@ -274,6 +274,7 @@ public sealed class FileSystemScanner
                 (attributes & FileAttributes.ReparsePoint) != 0
                     ? NativeDirectoryReader.GetReparsePointTag(entry.FullName)
                     : 0,
+                VolumeSerialNumber: 0,
                 HasNativeAllocation: false);
         }
     }
@@ -314,6 +315,7 @@ public sealed class FileSystemScanner
         LastWriteUtc = entry.LastWriteTimeUtc,
         LastAccessUtc = entry.LastAccessTimeUtc,
         Attributes = entry.Attributes,
+        VolumeSerialNumber = entry.VolumeSerialNumber,
         FileId = entry.FileId
     };
 
@@ -495,6 +497,7 @@ public sealed class FileSystemScanner
         DateTimeOffset LastAccessTimeUtc,
         FileAttributes Attributes,
         uint ReparsePointTag,
+        uint VolumeSerialNumber,
         bool HasNativeAllocation);
 
     private sealed class ExtensionAccumulator
@@ -537,6 +540,13 @@ public sealed class FileSystemScanner
             if (handle.IsInvalid)
             {
                 return false;
+            }
+
+            // File IDs are only unique per volume; without the serial, IDs from two volumes
+            // collide and unrelated files are deduplicated as hard links of each other.
+            if (!GetVolumeInformationByHandle(handle, IntPtr.Zero, 0, out var volumeSerialNumber, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, 0))
+            {
+                volumeSerialNumber = 0;
             }
 
             var results = new List<DirectoryEntryData>();
@@ -595,6 +605,7 @@ public sealed class FileSystemScanner
                                 FromFileTime(Marshal.ReadInt64(current, 16)),
                                 attributes,
                                 unchecked((uint)Marshal.ReadInt32(current, 68)),
+                                volumeSerialNumber,
                                 HasNativeAllocation: true));
                         }
 
@@ -689,6 +700,18 @@ public sealed class FileSystemScanner
             FileInfoByHandleClass fileInformationClass,
             IntPtr fileInformation,
             int bufferSize);
+
+        [DllImport("kernel32.dll", EntryPoint = "GetVolumeInformationByHandleW", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetVolumeInformationByHandle(
+            SafeFileHandle fileHandle,
+            IntPtr volumeNameBuffer,
+            uint volumeNameSize,
+            out uint volumeSerialNumber,
+            IntPtr maximumComponentLength,
+            IntPtr fileSystemFlags,
+            IntPtr fileSystemNameBuffer,
+            uint fileSystemNameSize);
 
         private enum FileInfoByHandleClass
         {

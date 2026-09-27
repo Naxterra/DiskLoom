@@ -40,8 +40,30 @@ public sealed class ExportService
         await using var stream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024, true);
         await JsonSerializer.SerializeAsync(stream, result, new JsonSerializerOptions(JsonSerializerDefaults.Web)
         {
-            WriteIndented = true
+            WriteIndented = true,
+            // Each folder level nests a node object inside a Children array; the default
+            // limit of 64 fails for trees only ~31 folders deep.
+            MaxDepth = Math.Max(64, GetTreeDepth(result.Root) * 2 + 8)
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static int GetTreeDepth(ScanNode root)
+    {
+        var maxDepth = 0;
+        var stack = new Stack<(ScanNode Node, int Depth)>();
+        stack.Push((root, 0));
+        while (stack.TryPop(out var item))
+        {
+            maxDepth = Math.Max(maxDepth, item.Depth);
+            foreach (var child in item.Node.Children)
+            {
+                if (child.IsDirectory)
+                {
+                    stack.Push((child, item.Depth + 1));
+                }
+            }
+        }
+        return maxDepth + 1;
     }
 
     private static string Escape(string value) => $"\"{value.Replace("\"", "\"\"")}\"";

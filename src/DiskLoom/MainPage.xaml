@@ -53,7 +53,7 @@
             <Grid ColumnSpacing="8">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="190" />
+                    <ColumnDefinition Width="250" />
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
@@ -82,16 +82,21 @@
                 <ComboBox x:Name="DrivePicker" x:Uid="DrivePicker" Grid.Column="1" Height="32" PlaceholderText="Choose a drive" SelectionChanged="DrivePicker_SelectionChanged">
                     <ComboBox.ItemTemplate>
                         <DataTemplate>
-                            <StackPanel VerticalAlignment="Center">
-                                <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
-                                <TextBlock Text="{Binding Detail}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            </StackPanel>
+                            <!-- One line: the closed 32 px picker reuses this template and clipped a second line. -->
+                            <Grid ColumnSpacing="8" ToolTipService.ToolTip="{Binding Detail}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="{Binding FreeText}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
+                            </Grid>
                         </DataTemplate>
                     </ComboBox.ItemTemplate>
                 </ComboBox>
                 <Grid Grid.Column="2" VerticalAlignment="Center">
                     <TextBox x:Name="PathBox" x:Uid="PathBox" Height="32" VerticalAlignment="Center" VerticalContentAlignment="Center" PlaceholderText="C:\ or \\server\share" KeyDown="PathBox_KeyDown" />
-                    <BreadcrumbBar x:Name="PathBreadcrumb" MinHeight="32" VerticalAlignment="Center" VerticalContentAlignment="Center" Visibility="Collapsed" ItemClicked="PathBreadcrumb_ItemClicked" />
+                    <BreadcrumbBar x:Name="PathBreadcrumb" VerticalAlignment="Center" VerticalContentAlignment="Center" Visibility="Collapsed" ItemClicked="PathBreadcrumb_ItemClicked" />
                 </Grid>
                 <Button x:Name="EditPathButton" Grid.Column="3" Width="34" Height="32" Style="{StaticResource NavigationButtonStyle}" Visibility="Collapsed" ToolTipService.ToolTip="Edit path" Click="EditPath_Click">
                     <FontIcon Glyph="&#xE70F;" FontSize="13" />
@@ -259,15 +264,18 @@
                                     <Setter Property="HorizontalContentAlignment" Value="Stretch" />
                                 </Style>
                             </ListView.ItemContainerStyle>
+                            <!-- Shared with the largest-files, insights and duplicates lists in the constructor. -->
                             <ListView.ContextFlyout>
-                                <MenuFlyout>
+                                <MenuFlyout x:Name="FileActionsMenu" Opening="FileActionsMenu_Opening">
+                                    <MenuFlyoutItem x:Name="FileOpenMenuItem" x:Uid="OpenMenu" Text="Open" Click="OpenSelected_Click" />
                                     <MenuFlyoutItem x:Uid="ShowInExplorerMenu" Text="Show in File Explorer" Click="ShowInExplorer_Click" />
                                     <MenuFlyoutItem x:Uid="CopyPathMenu" Text="Copy path" Click="CopySelectedPath_Click" />
+                                    <MenuFlyoutItem x:Name="FilePropertiesMenuItem" x:Uid="PropertiesMenu" Text="Properties" Click="ShowProperties_Click" />
                                     <MenuFlyoutSeparator />
-                                    <MenuFlyoutItem x:Uid="SelectAllMenu" Text="Select all" Click="SelectAllChildren_Click" />
+                                    <MenuFlyoutItem x:Uid="SelectAllMenu" Text="Select all" Click="SelectAll_Click" />
                                     <MenuFlyoutSeparator />
-                                    <MenuFlyoutItem x:Uid="RecycleMenu" Text="Move to Recycle Bin" Click="RecycleSelected_Click" />
-                                    <MenuFlyoutItem x:Uid="DeletePermanentlyMenu" Text="Delete permanently…" Click="DeleteSelected_Click" />
+                                    <MenuFlyoutItem x:Name="FileRecycleMenuItem" x:Uid="RecycleMenu" Text="Move to Recycle Bin" Click="RecycleSelected_Click" />
+                                    <MenuFlyoutItem x:Name="FileDeleteMenuItem" x:Uid="DeletePermanentlyMenu" Text="Delete permanently…" Click="DeleteSelected_Click" />
                                 </MenuFlyout>
                             </ListView.ContextFlyout>
                             <ListView.ItemTemplate>
@@ -321,7 +329,7 @@
                             <RowDefinition Height="*" />
                         </Grid.RowDefinitions>
                         <TextBlock x:Name="LargestHeaderText" x:Uid="LargestHeaderText" Text="The 1,000 largest files in this scan" Style="{StaticResource MutedTextStyle}" Margin="4,4,4,8" />
-                        <ListView x:Name="LargestFilesList" Grid.Row="1" SelectionMode="Single" DoubleTapped="AnyFileList_DoubleTapped">
+                        <ListView x:Name="LargestFilesList" Grid.Row="1" SelectionMode="Extended" DoubleTapped="AnyFileList_DoubleTapped">
                             <ListView.ItemTemplate>
                                 <DataTemplate>
                                     <Grid Padding="8,6" ColumnSpacing="12">
@@ -424,7 +432,7 @@
                             <Button x:Uid="ShowDuplicateButton" Grid.Column="3" Content="Show selected in Explorer" VerticalAlignment="Bottom" Margin="0,0,0,1" Click="ShowDuplicateInExplorer_Click" />
                         </Grid>
                         <InfoBar x:Uid="DuplicateInfo" Grid.Row="1" Severity="Informational" IsOpen="True" IsClosable="False" Margin="0,10,0,8" Message="DiskLoom samples candidates first, then verifies every byte with SHA-256. It never auto-selects files for deletion." />
-                        <ListView x:Name="DuplicatesList" Grid.Row="2" SelectionMode="Single" DoubleTapped="DuplicateList_DoubleTapped">
+                        <ListView x:Name="DuplicatesList" Grid.Row="2" SelectionMode="Extended" DoubleTapped="DuplicateList_DoubleTapped">
                             <ListView.ItemTemplate>
                                 <DataTemplate>
                                     <Grid Padding="8,6" ColumnSpacing="12">
@@ -452,7 +460,7 @@
                             <RowDefinition Height="*" />
                         </Grid.RowDefinitions>
                         <TextBlock x:Uid="InsightsHint" Text="Review-first cleanup opportunities—DiskLoom never deletes these automatically." Style="{StaticResource MutedTextStyle}" Margin="4,4,4,8" />
-                        <ListView x:Name="InsightsList" Grid.Row="1" SelectionMode="Single" DoubleTapped="InsightList_DoubleTapped">
+                        <ListView x:Name="InsightsList" Grid.Row="1" SelectionMode="Extended" DoubleTapped="InsightList_DoubleTapped">
                             <ListView.ItemTemplate>
                                 <DataTemplate>
                                     <Border Style="{StaticResource MetricCardStyle}" Margin="0,0,0,8">
