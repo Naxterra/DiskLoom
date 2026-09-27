@@ -39,6 +39,7 @@ try
     Assert(result.Root.Files().Count(static file => file.IsAdditionalHardLink) == 1, "Hard-link allocation was not deduplicated.");
     Assert(result.Root.Files().Where(static file => file.IsAdditionalHardLink).All(static file => file.AllocatedSize == 0), "Additional hard links must not allocate the data twice.");
     Assert(result.Extensions.Any(static extension => extension.Extension == ".bin" && extension.FileCount == 3), "Extension statistics are incorrect.");
+    Assert(result.Root.Files().All(static file => file.VolumeSerialNumber != 0), "Scanned files must record their volume so file IDs from different volumes cannot collide.");
 
     var duplicateResult = await new DuplicateFinder().FindAsync(result.Root, minimumFileSize: 1);
     Assert(duplicateResult.Groups.Count == 1, $"Expected one duplicate group, found {duplicateResult.Groups.Count}.");
@@ -65,6 +66,47 @@ try
     await exporter.ExportJsonAsync(afterResult, jsonPath);
     Assert(File.ReadAllText(csvPath).Contains("unique.txt", StringComparison.Ordinal), "CSV export is missing a file.");
     Assert(File.ReadAllText(jsonPath).Contains("unique.txt", StringComparison.Ordinal), "JSON export is missing a file.");
+
+    var driveRoot = new ScanNode { Name = "C:\\", FullPath = "C:\\", IsDirectory = true };
+    driveRoot.Children.Add(new ScanNode { Name = "Windows", FullPath = "C:\\Windows", IsDirectory = true });
+    var driveResult = new ScanResult(driveRoot, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, [], [], []);
+    var originalDirectory = Environment.CurrentDirectory;
+    try
+    {
+        Environment.CurrentDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        var fromWindows = snapshotService.Create(driveResult);
+        Environment.CurrentDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
+        var fromSystem = snapshotService.Create(driveResult);
+        Assert(fromWindows.Entries.Select(static entry => entry.RelativePath).SequenceEqual([".", "Windows"]), "Drive-root snapshot paths must be relative to the drive root.");
+        Assert(snapshotService.Compare(fromWindows, fromSystem).Count == 0, "Drive-root snapshots must not depend on the working directory.");
+    }
+    finally
+    {
+        Environment.CurrentDirectory = originalDirectory;
+    }
+
+    var legacySnapshotPath = Path.Combine(testRoot, "legacy.diskloom");
+    await using (var legacyFile = File.Create(legacySnapshotPath))
+    await using (var legacyGzip = new System.IO.Compression.GZipStream(legacyFile, System.IO.Compression.CompressionLevel.Fastest))
+    {
+        await System.Text.Json.JsonSerializer.SerializeAsync(
+            legacyGzip,
+            new ScanSnapshot("C:\\", DateTimeOffset.UtcNow, [new SnapshotEntry("..", true, 0, 0, 0)]),
+            new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+    }
+    await AssertThrowsAsync<InvalidDataException>(() => snapshotService.LoadAsync(legacySnapshotPath));
+
+    var deepRoot = new ScanNode { Name = "C:\\", FullPath = "C:\\", IsDirectory = true };
+    var deepNode = deepRoot;
+    for (var level = 0; level < 60; level++)
+    {
+        var next = new ScanNode { Name = $"d{level}", FullPath = Path.Combine(deepNode.FullPath, $"d{level}"), IsDirectory = true };
+        deepNode.Children.Add(next);
+        deepNode = next;
+    }
+    var deepJsonPath = Path.Combine(testRoot, "deep.json");
+    await exporter.ExportJsonAsync(new ScanResult(deepRoot, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, [], [], []), deepJsonPath);
+    Assert(File.ReadAllText(deepJsonPath).Contains("\"d59\"", StringComparison.Ordinal), "JSON export must handle deeply nested folders.");
 
     using var canceled = new CancellationTokenSource();
     canceled.Cancel();

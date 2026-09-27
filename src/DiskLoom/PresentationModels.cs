@@ -100,9 +100,17 @@ public sealed class ResultColumnLayout : INotifyPropertyChanged
     }
 }
 
-public sealed class NodeRow(ScanNode source, bool displayAllocated = false, ResultColumnLayout? columnLayout = null)
+// A row that the shared file context menu (open, reveal, properties, delete) can act on.
+public interface IFileActionRow
+{
+    string Path { get; }
+    bool CanDelete { get; }
+}
+
+public sealed class NodeRow(ScanNode source, bool displayAllocated = false, ResultColumnLayout? columnLayout = null) : IFileActionRow
 {
     public ScanNode Source { get; } = source;
+    public bool CanDelete => true;
     public ResultColumnLayout ColumnLayout { get; } = columnLayout ?? ResultColumnLayout.Fallback;
     public string Name => Source.Name;
     public string Path => Source.FullPath;
@@ -142,9 +150,10 @@ public sealed class AgeRow(AgeStatistic statistic)
     public string CountText { get; } = LocalizationService.Format("FilesCount", statistic.FileCount);
 }
 
-public sealed class DuplicateRow(int groupNumber, DuplicateGroup group, DuplicateFile file)
+public sealed class DuplicateRow(int groupNumber, DuplicateGroup group, DuplicateFile file) : IFileActionRow
 {
     public int GroupNumber { get; } = groupNumber;
+    public bool CanDelete => true;
     public DuplicateGroup Group { get; } = group;
     public DuplicateFile File { get; } = file;
     public string GroupText => LocalizationService.Format("GroupNumber", GroupNumber);
@@ -154,9 +163,11 @@ public sealed class DuplicateRow(int groupNumber, DuplicateGroup group, Duplicat
     public string ModifiedText => File.LastWriteUtc.LocalDateTime.ToString("g");
 }
 
-public sealed class InsightRow(StorageInsight insight)
+public sealed class InsightRow(StorageInsight insight) : IFileActionRow
 {
     public StorageInsight Insight { get; } = insight;
+    // Aggregate insights (temporary/empty files) point at the scan root, which must never be deleted from here.
+    public bool CanDelete => Insight.Kind is "LargeFile" or "StaleFile";
     public string Title => LocalizationService.Get(Insight.Kind switch
     {
         "LargeFile" => "InsightLargeTitle",
@@ -210,6 +221,9 @@ public sealed class DriveRow
     public DriveRow(DriveSummary drive) => Drive = drive;
     public DriveSummary Drive { get; }
     public string DisplayName => Drive.DisplayName;
+    public string FreeText => Drive.IsReady
+        ? LocalizationService.Format("DriveFree", ByteFormatter.Format(Drive.FreeBytes))
+        : LocalizationService.Get("NotReady");
     public string Detail => Drive.IsReady
         ? LocalizationService.Format("DriveFreeOf", ByteFormatter.Format(Drive.FreeBytes), ByteFormatter.Format(Drive.TotalBytes), Drive.Format)
         : LocalizationService.Get("NotReady");

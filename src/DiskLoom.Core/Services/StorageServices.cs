@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using DiskLoom.Core.Models;
 using Microsoft.VisualBasic.FileIO;
 
@@ -151,6 +152,17 @@ public sealed class FileOperationService
         var arguments = File.Exists(path) ? $"/select,\"{path}\"" : $"\"{path}\"";
         Process.Start(new ProcessStartInfo("explorer.exe", arguments) { UseShellExecute = true });
     }
+
+    public void Open(string path) => Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+
+    public bool ShowProperties(nint ownerWindow, string path) =>
+        OperatingSystem.IsWindows() && SHObjectProperties(ownerWindow, ShopFilePath, path, null);
+
+    private const uint ShopFilePath = 0x2;
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SHObjectProperties(nint ownerWindow, uint objectType, string objectName, string? propertyPage);
 }
 
 public static class ByteFormatter

@@ -27,6 +27,25 @@ public sealed class DuplicateFinder
             .SelectMany(static group => group)
             .ToArray();
 
+        var lastReportTick = 0L;
+        void ReportProgress(string phase, long current, long total, string path)
+        {
+            if (progress is null)
+            {
+                return;
+            }
+
+            var now = Environment.TickCount64;
+            var previous = Interlocked.Read(ref lastReportTick);
+            if (current != total &&
+                (now - previous < 100 || Interlocked.CompareExchange(ref lastReportTick, now, previous) != previous))
+            {
+                return;
+            }
+
+            progress.Report(new DuplicateProgress(phase, current, total, path));
+        }
+
         var quickHashes = new ConcurrentBag<(ScanNode File, string Hash)>();
         var processed = 0L;
         await Parallel.ForEachAsync(
@@ -49,8 +68,7 @@ public sealed class DuplicateFinder
                 }
                 finally
                 {
-                    var current = Interlocked.Increment(ref processed);
-                    progress?.Report(new DuplicateProgress("Sampling", current, candidates.LongLength, file.FullPath));
+                    ReportProgress("Sampling", Interlocked.Increment(ref processed), candidates.LongLength, file.FullPath);
                 }
             }).ConfigureAwait(false);
 
@@ -89,8 +107,7 @@ public sealed class DuplicateFinder
                 }
                 finally
                 {
-                    var current = Interlocked.Increment(ref processed);
-                    progress?.Report(new DuplicateProgress("Verifying", current, fullCandidates.LongLength, file.FullPath));
+                    ReportProgress("Verifying", Interlocked.Increment(ref processed), fullCandidates.LongLength, file.FullPath);
                 }
             }).ConfigureAwait(false);
 

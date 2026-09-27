@@ -15,16 +15,7 @@ public sealed class SnapshotService
     {
         ArgumentNullException.ThrowIfNull(result);
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
-        var rootPrefix = result.Root.FullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var entries = result.Root.DescendantsAndSelf()
-            .Select(node => new SnapshotEntry(
-                Path.GetRelativePath(rootPrefix, node.FullPath),
-                node.IsDirectory,
-                node.Size,
-                node.AllocatedSize,
-                node.FileCount))
-            .ToArray();
-        var snapshot = new ScanSnapshot(result.Root.FullPath, DateTimeOffset.UtcNow, entries);
+        var snapshot = Create(result);
 
         await using var file = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024, true);
         await using var gzip = new GZipStream(file, CompressionLevel.SmallestSize, leaveOpen: false);
@@ -36,8 +27,18 @@ public sealed class SnapshotService
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
         await using var file = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, true);
         await using var gzip = new GZipStream(file, CompressionMode.Decompress, leaveOpen: false);
-        return await JsonSerializer.DeserializeAsync<ScanSnapshot>(gzip, JsonOptions, cancellationToken).ConfigureAwait(false)
+        var snapshot = await JsonSerializer.DeserializeAsync<ScanSnapshot>(gzip, JsonOptions, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidDataException("The snapshot file is empty or invalid.");
+
+        // DiskLoom 0.1.19 and earlier stored drive-root paths relative to the process working
+        // directory, so the root entry was saved as "..", "..\.." and so on instead of ".".
+        if (snapshot.Entries.Count > 0 && snapshot.Entries[0].RelativePath != ".")
+        {
+            throw new InvalidDataException(
+                "This snapshot was saved by DiskLoom 0.1.19 or earlier, which stored drive-root paths incorrectly. Save a new snapshot to compare against.");
+        }
+
+        return snapshot;
     }
 
     public IReadOnlyList<SnapshotChange> Compare(ScanSnapshot older, ScanSnapshot newer, bool includeUnchanged = false)
@@ -81,17 +82,42 @@ public sealed class SnapshotService
 
     public ScanSnapshot Create(ScanResult result)
     {
-        var rootPrefix = result.Root.FullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        ArgumentNullException.ThrowIfNull(result);
+        var rootPath = result.Root.FullPath;
         return new ScanSnapshot(
-            result.Root.FullPath,
+            rootPath,
             DateTimeOffset.UtcNow,
             result.Root.DescendantsAndSelf()
                 .Select(node => new SnapshotEntry(
-                    Path.GetRelativePath(rootPrefix, node.FullPath),
+                    GetRelativePath(rootPath, node.FullPath),
                     node.IsDirectory,
                     node.Size,
                     node.AllocatedSize,
                     node.FileCount))
                 .ToArray());
+    }
+
+    // Scanned paths are built by appending names to the root path, so slicing is exact and,
+    // unlike Path.GetRelativePath on a trimmed "C:", never depends on the working directory.
+    private static string GetRelativePath(string rootPath, string fullPath)
+    {
+        if (!fullPath.StartsWith(rootPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return Path.GetRelativePath(rootPath, fullPath);
+        }
+
+        if (fullPath.Length == rootPath.Length)
+        {
+            return ".";
+        }
+
+        if (Path.EndsInDirectorySeparator(rootPath))
+        {
+            return fullPath[rootPath.Length..];
+        }
+
+        return fullPath[rootPath.Length] is '\\' or '/'
+            ? fullPath[(rootPath.Length + 1)..]
+            : Path.GetRelativePath(rootPath, fullPath);
     }
 }
