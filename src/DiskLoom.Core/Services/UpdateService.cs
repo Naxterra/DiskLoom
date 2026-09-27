@@ -27,14 +27,19 @@ public sealed class UpdateService(HttpClient? httpClient = null)
             ?? new UpdateConfiguration();
     }
 
+    // DiskLoom's MSI upgrade family (installer/DiskLoom/Package.wxs); an update must belong to it.
+    public const string InstallerUpgradeCode = "{5B7A6F64-E796-4D90-B4E3-4F10967E22C5}";
+
+    // preferredLanguage picks the matching localized MSI (e.g. "de-DE"); null or "en-US" = the default MSI.
     public async Task<UpdateCheckResult> CheckAsync(
         UpdateConfiguration configuration,
         Version currentVersion,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? preferredLanguage = null)
     {
         if (!string.IsNullOrWhiteSpace(configuration.GitHubRepository))
         {
-            return await CheckGitHubReleaseAsync(configuration.GitHubRepository, currentVersion, cancellationToken).ConfigureAwait(false);
+            return await CheckGitHubReleaseAsync(configuration.GitHubRepository, currentVersion, preferredLanguage, cancellationToken).ConfigureAwait(false);
         }
 
         if (string.IsNullOrWhiteSpace(configuration.ManifestUrl))
@@ -66,6 +71,7 @@ public sealed class UpdateService(HttpClient? httpClient = null)
     private async Task<UpdateCheckResult> CheckGitHubReleaseAsync(
         string repository,
         Version currentVersion,
+        string? preferredLanguage,
         CancellationToken cancellationToken)
     {
         var parts = repository.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -109,11 +115,7 @@ public sealed class UpdateService(HttpClient? httpClient = null)
         }
         else
         {
-            var installer = release.Assets
-                .Where(static asset => Path.GetExtension(asset.Name).Equals(".msi", StringComparison.OrdinalIgnoreCase) ||
-                                       Path.GetExtension(asset.Name).Equals(".exe", StringComparison.OrdinalIgnoreCase))
-                .OrderByDescending(static asset => asset.Name.Contains("x64", StringComparison.OrdinalIgnoreCase))
-                .FirstOrDefault();
+            var installer = SelectInstaller(release.Assets, preferredLanguage, RuntimeInformation.ProcessArchitecture);
             var digest = installer?.Digest;
             var sha256 = digest is not null && digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)
                 ? digest[7..]
@@ -141,6 +143,47 @@ public sealed class UpdateService(HttpClient? httpClient = null)
             isAvailable ? $"DiskLoom {availableVersion} is available on GitHub." : "DiskLoom is up to date with GitHub Releases.");
     }
 
+    // Releases carry one MSI per UI language: DiskLoom-Setup-x64.msi (English) and DiskLoom-Setup-x64-de-DE.msi.
+    private static GitHubReleaseAsset? SelectInstaller(IReadOnlyList<GitHubReleaseAsset> assets, string? preferredLanguage, Architecture architecture)
+    {
+        var architectureTag = architecture == Architecture.Arm64 ? "arm64" : "x64";
+        var installers = assets
+            .Where(static asset => Path.GetExtension(asset.Name).Equals(".msi", StringComparison.OrdinalIgnoreCase))
+            .Where(asset => asset.Name.Contains(architectureTag, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        static string? LanguageOf(string name)
+        {
+            // "…-x64-de-DE.msi" → "de-DE"; "…-x64.msi" → null.
+            var stem = Path.GetFileNameWithoutExtension(name);
+            var parts = stem.Split('-');
+            return parts.Length >= 2 && parts[^2].Length == 2 && parts[^1].Length == 2 && parts[^1].All(char.IsUpper)
+                ? $"{parts[^2]}-{parts[^1]}"
+                : null;
+        }
+
+        var wanted = string.IsNullOrWhiteSpace(preferredLanguage) || preferredLanguage.Equals("en-US", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : preferredLanguage;
+        return installers.FirstOrDefault(asset => string.Equals(LanguageOf(asset.Name), wanted, StringComparison.OrdinalIgnoreCase))
+            ?? installers.FirstOrDefault(asset => LanguageOf(asset.Name) is null)
+            ?? installers.FirstOrDefault();
+    }
+
+    // Unsigned builds install only DiskLoom MSIs downloaded from this repository's own GitHub releases;
+    // a pinned publisher certificate additionally requires a matching Authenticode signature.
+    public static bool CanInstallDirectly(UpdateManifest manifest, UpdateConfiguration configuration) =>
+        manifest.HasVerifiableInstaller &&
+        (!string.IsNullOrWhiteSpace(configuration.PublisherCertificateSha256) ||
+         (IsRepositoryDownload(manifest.InstallerUrl, configuration.GitHubRepository) &&
+          Path.GetExtension(new Uri(manifest.InstallerUrl).AbsolutePath).Equals(".msi", StringComparison.OrdinalIgnoreCase)));
+
+    private static bool IsRepositoryDownload(string url, string repository) =>
+        !string.IsNullOrWhiteSpace(repository) &&
+        Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
+        uri.Scheme == Uri.UriSchemeHttps &&
+        uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase) &&
+        uri.AbsolutePath.StartsWith($"/{repository.Trim().Trim('/')}/releases/download/", StringComparison.OrdinalIgnoreCase);
+
     private static bool TryParseReleaseVersion(string tag, out Version version)
     {
         var candidate = tag.Trim();
@@ -162,9 +205,9 @@ public sealed class UpdateService(HttpClient? httpClient = null)
         IProgress<double>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(configuration.PublisherCertificateSha256))
+        if (!CanInstallDirectly(manifest, configuration))
         {
-            throw new InvalidOperationException("This build has no pinned publisher certificate and will not install remote updates.");
+            throw new InvalidOperationException("This update cannot be verified well enough to install it automatically.");
         }
 
         var installerUri = new Uri(manifest.InstallerUrl, UriKind.Absolute);
@@ -208,36 +251,69 @@ public sealed class UpdateService(HttpClient? httpClient = null)
             }
         }
 
+        byte[] actualHash;
         await using (var file = File.OpenRead(temporary))
         {
-            var actualHash = Convert.ToHexString(await SHA256.HashDataAsync(file, cancellationToken).ConfigureAwait(false));
-            if (!CryptographicOperations.FixedTimeEquals(
-                    Convert.FromHexString(actualHash),
-                    Convert.FromHexString(NormalizeFingerprint(manifest.Sha256))))
-            {
-                File.Delete(temporary);
-                throw new CryptographicException("The downloaded installer does not match the release manifest SHA-256 hash.");
-            }
+            actualHash = await SHA256.HashDataAsync(file, cancellationToken).ConfigureAwait(false);
+        }
+        // The file must be closed before it can be deleted on a mismatch.
+        if (!CryptographicOperations.FixedTimeEquals(actualHash, Convert.FromHexString(NormalizeFingerprint(manifest.Sha256))))
+        {
+            File.Delete(temporary);
+            throw new CryptographicException("The downloaded installer does not match the release manifest SHA-256 hash.");
         }
 
-        if (!AuthenticodeVerifier.IsTrustedAndSignedBy(temporary, configuration.PublisherCertificateSha256, out var signatureError))
+        if (!string.IsNullOrWhiteSpace(configuration.PublisherCertificateSha256) &&
+            !AuthenticodeVerifier.IsTrustedAndSignedBy(temporary, configuration.PublisherCertificateSha256, out var signatureError))
         {
             File.Delete(temporary);
             throw new CryptographicException(signatureError);
+        }
+
+        if (extension == ".msi" && !IsExpectedMsi(temporary, manifest.Version, out var packageError))
+        {
+            File.Delete(temporary);
+            throw new InvalidDataException(packageError);
         }
 
         File.Move(temporary, destination, overwrite: true);
         return destination;
     }
 
-    public Process StartInstaller(string installerPath)
+    // Checks that the package is DiskLoom's (same upgrade family) and carries the offered version.
+    public static bool IsExpectedMsi(string msiPath, string expectedVersion, out string error)
+    {
+        var upgradeCode = MsiPackage.ReadProperty(msiPath, "UpgradeCode");
+        var productVersion = MsiPackage.ReadProperty(msiPath, "ProductVersion");
+        if (!string.Equals(upgradeCode, InstallerUpgradeCode, StringComparison.OrdinalIgnoreCase))
+        {
+            error = $"The downloaded installer is not a DiskLoom package (upgrade code {upgradeCode ?? "missing"}).";
+            return false;
+        }
+        if (!Version.TryParse(productVersion, out var actual) ||
+            !Version.TryParse(expectedVersion, out var expected) ||
+            actual.Major != expected.Major || actual.Minor != expected.Minor || Math.Max(0, actual.Build) != Math.Max(0, expected.Build))
+        {
+            error = $"The downloaded installer has version {productVersion ?? "missing"}, not {expectedVersion}.";
+            return false;
+        }
+        error = string.Empty;
+        return true;
+    }
+
+    // relaunchPath: started again once Windows Installer has finished (or was canceled).
+    public Process StartInstaller(string installerPath, string? relaunchPath = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(installerPath);
         if (Path.GetExtension(installerPath).Equals(".msi", StringComparison.OrdinalIgnoreCase))
         {
-            return Process.Start(new ProcessStartInfo("msiexec.exe", $"/i \"{installerPath}\" /passive")
+            var log = Path.Combine(Path.GetDirectoryName(installerPath)!, "install.log");
+            var install = $"start \"\" /wait msiexec.exe /i \"{installerPath}\" /passive /norestart /l*v \"{log}\"";
+            var command = string.IsNullOrWhiteSpace(relaunchPath) ? install : $"{install} & start \"\" \"{relaunchPath}\"";
+            return Process.Start(new ProcessStartInfo("cmd.exe", $"/d /c {command}")
             {
-                UseShellExecute = true
+                UseShellExecute = false,
+                CreateNoWindow = true
             }) ?? throw new InvalidOperationException("Windows Installer could not be started.");
         }
 
@@ -248,6 +324,68 @@ public sealed class UpdateService(HttpClient? httpClient = null)
     }
 
     private static string NormalizeFingerprint(string value) => value.Replace(" ", string.Empty, StringComparison.Ordinal).ToUpperInvariant();
+
+    private static class MsiPackage
+    {
+        public static string? ReadProperty(string msiPath, string property)
+        {
+            if (!OperatingSystem.IsWindows() || property.Any(static character => !char.IsLetterOrDigit(character)))
+            {
+                return null;
+            }
+
+            nint database = 0, view = 0, record = 0;
+            try
+            {
+                // Null persist mode = MSIDBOPEN_READONLY.
+                if (MsiOpenDatabase(msiPath, IntPtr.Zero, out database) != 0 ||
+                    MsiDatabaseOpenView(database, $"SELECT `Value` FROM `Property` WHERE `Property`='{property}'", out view) != 0 ||
+                    MsiViewExecute(view, 0) != 0 ||
+                    MsiViewFetch(view, out record) != 0)
+                {
+                    return null;
+                }
+
+                var length = 0;
+                var empty = new char[1];
+                const int moreData = 234;
+                if (MsiRecordGetString(record, 1, empty, ref length) is not (0 or moreData))
+                {
+                    return null;
+                }
+                var buffer = new char[++length];
+                return MsiRecordGetString(record, 1, buffer, ref length) == 0 ? new string(buffer, 0, length) : null;
+            }
+            finally
+            {
+                foreach (var handle in new[] { record, view, database })
+                {
+                    if (handle != 0)
+                    {
+                        MsiCloseHandle(handle);
+                    }
+                }
+            }
+        }
+
+        [DllImport("msi.dll", EntryPoint = "MsiOpenDatabaseW", CharSet = CharSet.Unicode)]
+        private static extern uint MsiOpenDatabase(string databasePath, IntPtr persist, out nint database);
+
+        [DllImport("msi.dll", EntryPoint = "MsiDatabaseOpenViewW", CharSet = CharSet.Unicode)]
+        private static extern uint MsiDatabaseOpenView(nint database, string query, out nint view);
+
+        [DllImport("msi.dll")]
+        private static extern uint MsiViewExecute(nint view, nint record);
+
+        [DllImport("msi.dll")]
+        private static extern uint MsiViewFetch(nint view, out nint record);
+
+        [DllImport("msi.dll", EntryPoint = "MsiRecordGetStringW", CharSet = CharSet.Unicode)]
+        private static extern uint MsiRecordGetString(nint record, uint field, [Out] char[] value, ref int length);
+
+        [DllImport("msi.dll")]
+        private static extern uint MsiCloseHandle(nint handle);
+    }
 
     private static class AuthenticodeVerifier
     {

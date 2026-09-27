@@ -224,6 +224,16 @@ try
           "published_at": "2026-08-18T08:00:00Z",
           "assets": [
             {
+              "name": "DiskLoom-Setup-x64-de-DE.msi",
+              "browser_download_url": "https://github.com/Naxterra/DiskLoom/releases/download/v0.2.0/DiskLoom-Setup-x64-de-DE.msi",
+              "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            {
+              "name": "DiskLoom-0.2.0-win-x64-portable.zip",
+              "browser_download_url": "https://github.com/Naxterra/DiskLoom/releases/download/v0.2.0/DiskLoom-0.2.0-win-x64-portable.zip",
+              "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            {
               "name": "DiskLoom-Setup-x64.msi",
               "browser_download_url": "https://github.com/Naxterra/DiskLoom/releases/download/v0.2.0/DiskLoom-Setup-x64.msi",
               "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -245,6 +255,21 @@ try
         new Version(0, 1, 4));
     Assert(githubCheck.IsConfigured && githubCheck.IsUpdateAvailable, "GitHub release should be detected as an update.");
     Assert(githubCheck.Manifest?.HasVerifiableInstaller == true, "GitHub asset digest should produce a verifiable installer manifest.");
+    Assert(githubCheck.Manifest!.InstallerUrl.EndsWith("/DiskLoom-Setup-x64.msi", StringComparison.Ordinal) && githubCheck.Manifest.Sha256.StartsWith('a'),
+        "Without a language preference the English MSI must be chosen.");
+    var germanCheck = await new UpdateService(githubClient).CheckAsync(
+        new UpdateConfiguration { GitHubRepository = "Naxterra/DiskLoom" }, new Version(0, 1, 4), preferredLanguage: "de-DE");
+    Assert(germanCheck.Manifest!.InstallerUrl.EndsWith("/DiskLoom-Setup-x64-de-DE.msi", StringComparison.Ordinal) && germanCheck.Manifest.Sha256.StartsWith('b'),
+        "The German UI must update with the German MSI.");
+    var repositoryConfiguration = new UpdateConfiguration { GitHubRepository = "Naxterra/DiskLoom" };
+    Assert(UpdateService.CanInstallDirectly(githubCheck.Manifest, repositoryConfiguration), "An MSI from the configured repository's release must be installable without a pinned certificate.");
+    Assert(!UpdateService.CanInstallDirectly(githubCheck.Manifest with { InstallerUrl = "https://example.com/Naxterra/DiskLoom/releases/download/v0.2.0/DiskLoom-Setup-x64.msi" }, repositoryConfiguration),
+        "An installer hosted anywhere but the repository's GitHub releases must not install automatically.");
+    Assert(!UpdateService.CanInstallDirectly(githubCheck.Manifest, new UpdateConfiguration { GitHubRepository = "Someone/Else" }), "Another repository's download must not install automatically.");
+    Assert(!UpdateService.CanInstallDirectly(githubCheck.Manifest with { Sha256 = string.Empty }, repositoryConfiguration), "An installer without a SHA-256 digest must not install automatically.");
+    var notAnMsi = Path.Combine(testRoot, "fake.msi");
+    await File.WriteAllTextAsync(notAnMsi, "not a Windows Installer package");
+    Assert(!UpdateService.IsExpectedMsi(notAnMsi, "0.2.0", out _), "A file that is not DiskLoom's MSI must be rejected.");
     Assert(githubCheck.Manifest?.ReleaseNotesUrl.EndsWith("/v0.2.0", StringComparison.Ordinal) == true, "GitHub release page was not retained.");
 
     using var noReleaseClient = new HttpClient(new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound)));
