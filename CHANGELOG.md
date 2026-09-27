@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.21 — 2026-09-27
+
+- Added live results while scanning: the top-level folders and their growing sizes, file counts and treemap appear within a second instead of after the whole drive is done. Scan speed is unchanged (C:\, 600,000 files: 7.0 s with and without live results).
+- Added share-of-parent bars: a "% of parent" column in the results list, bars in the folder tree, and fill bars for drives.
+- Added configurable result columns: show or hide size, size on disk, % of parent, files, folders, modified, created, last accessed, type and attributes from the column header's right-click menu, reorder them under ⋯ → Customize columns, and sort by any of them. The choice is remembered.
+- Added a Search tab that searches the whole scan (or only the current folder) by name wildcards, file type, size range and modification date; results have the full right-click menu.
+- Added a tree filter (Filter in the command bar) by file type, name pattern or age. Folder sizes, the tree, the treemap, charts, largest files and insights then count only the matching files; snapshots always use the complete scan.
+- Added a Charts tab with ring and bar charts of the current folder by subfolder, extension, file type or age; double-click a folder slice to open it.
+- Added Copy to… and Move to… to the right-click menus of the result lists and the folder tree, using Explorer's own copy engine (progress, name-conflict prompts, Undo).
+- Replaced the export file picker with an export dialog: CSV, JSON, Excel workbook (.xlsx, with an indented tree sheet and a file-type sheet), HTML report and PDF report, for the whole scan or the current folder, with a folder-depth limit and an option to leave out files. The CLI's `--export` accepts .xlsx and .html, with new `--depth` and `--no-files` switches.
+- Fixed the treemap using only its minimum height instead of the whole tab.
+
 ## 0.1.20 — 2026-09-27
 
 - Added a right-click menu to the results, largest files, insights and duplicates lists: Open, Show in File Explorer, Copy path, Properties, Select all, Move to Recycle Bin and Delete permanently. All four lists support Ctrl/Shift multi-select, and deleted items disappear from every list.

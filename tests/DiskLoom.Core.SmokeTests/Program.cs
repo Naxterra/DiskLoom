@@ -67,6 +67,102 @@ try
     Assert(File.ReadAllText(csvPath).Contains("unique.txt", StringComparison.Ordinal), "CSV export is missing a file.");
     Assert(File.ReadAllText(jsonPath).Contains("unique.txt", StringComparison.Ordinal), "JSON export is missing a file.");
 
+    // Live results: with throttling off, every report after the root listing carries a snapshot
+    // of the top-level entries whose sizes never exceed the final aggregated sizes.
+    var liveSnapshots = new System.Collections.Concurrent.ConcurrentBag<IReadOnlyList<ScanNode>>();
+    var (savedProgressInterval, savedSnapshotInterval) = (FileSystemScanner.ProgressIntervalMilliseconds, FileSystemScanner.LiveSnapshotIntervalMilliseconds);
+    FileSystemScanner.ProgressIntervalMilliseconds = 0;
+    FileSystemScanner.LiveSnapshotIntervalMilliseconds = 0;
+    ScanResult liveResult;
+    try
+    {
+        liveResult = await scanner.ScanAsync(testRoot, new ScanOptions { Parallelism = 2, ExcludePatterns = ["SkipMe"] },
+            new SynchronousProgress<ScanProgress>(value =>
+            {
+                if (value.TopLevel is { } topLevel)
+                {
+                    liveSnapshots.Add(topLevel);
+                }
+            }));
+    }
+    finally
+    {
+        (FileSystemScanner.ProgressIntervalMilliseconds, FileSystemScanner.LiveSnapshotIntervalMilliseconds) = (savedProgressInterval, savedSnapshotInterval);
+    }
+    Assert(!liveSnapshots.IsEmpty, "A scan must report live top-level results before it finishes.");
+    var finalSizes = liveResult.Root.Children.ToDictionary(static child => child.FullPath, static child => child.Size, StringComparer.OrdinalIgnoreCase);
+    Assert(liveSnapshots.All(snapshot => snapshot.All(entry => finalSizes.TryGetValue(entry.FullPath, out var final) && entry.Size <= final && entry.Children.Count == 0)),
+        "Live entries must be detached top-level copies that never exceed the final size.");
+    Assert(liveSnapshots.Any(static snapshot => snapshot.Any(static entry => entry.IsDirectory && entry.Size > 0)), "Live folder sizes must grow while their contents are scanned.");
+
+    var binSearch = ScanSearch.Search(result.Root, new SearchCriteria { NamePattern = "*.bin" });
+    Assert(binSearch.MatchCount == 3 && binSearch.Matches.All(static node => node.Extension == ".bin"), $"Wildcard search found {binSearch.MatchCount} .bin files, expected 3.");
+    var substringSearch = ScanSearch.Search(result.Root, new SearchCriteria { NamePattern = "uniq", Kind = SearchItemKind.FilesAndFolders });
+    Assert(substringSearch.MatchCount == 1, "A pattern without wildcards must match as a substring.");
+    var folderSearch = ScanSearch.Search(result.Root, new SearchCriteria { Kind = SearchItemKind.Folders, MinimumSize = duplicateBytes.Length + 1 });
+    Assert(folderSearch.Matches.Select(static node => node.Name).SequenceEqual(["Second"]), "Folder search with a size floor should return only 'Second'.");
+    var cappedSearch = ScanSearch.Search(result.Root, new SearchCriteria { MaximumResults = 2 });
+    Assert(cappedSearch.MatchCount == 4 && cappedSearch.Matches.Count == 2 && cappedSearch.IsTruncated &&
+           cappedSearch.Matches[0].Size >= cappedSearch.Matches[1].Size, "Capped search must keep the largest matches, largest first, and count all of them.");
+    var futureSearch = ScanSearch.Search(result.Root, new SearchCriteria { ModifiedAfter = DateTimeOffset.UtcNow.AddDays(1) });
+    Assert(futureSearch.MatchCount == 0, "Date criteria must exclude files modified earlier.");
+    Assert(ScanSearch.Search(result.Root, new SearchCriteria { Category = FileTypeCategory.Document }).MatchCount == 1, ".txt belongs to the Document category.");
+
+    var textOnly = ScanTreeFilter.Apply(result, new TreeFilter { NamePattern = "*.txt" }, DateTimeOffset.UtcNow);
+    Assert(textOnly.Root.FileCount == 1 && textOnly.Root.FolderCount == 1 && textOnly.Root.Size == "DiskLoom smoke test".Length,
+        "The tree filter must keep only matching files and the folders that contain them.");
+    Assert(textOnly.Root.Children.Single().Name == "Second" && result.Root.FileCount == 4, "Filtering must not modify the original tree.");
+    Assert(textOnly.Extensions.Single().Extension == ".txt", "Filtered statistics must describe the filtered files.");
+    var oldOnly = ScanTreeFilter.Apply(result, new TreeFilter { OlderThanDays = 1 }, DateTimeOffset.UtcNow);
+    Assert(oldOnly.Root.FileCount == 0 && oldOnly.Root.Children.Count == 0, "Files created just now are not older than a day.");
+    Assert(ReferenceEquals(ScanTreeFilter.Apply(result, new TreeFilter(), DateTimeOffset.UtcNow), result), "An empty filter must return the original result.");
+
+    foreach (var kind in Enum.GetValues<BreakdownKind>())
+    {
+        var slices = FolderBreakdown.Create(result.Root, kind, maximumSlices: 2, DateTimeOffset.UtcNow);
+        Assert(slices.Sum(static slice => slice.Size) == result.Root.Size, $"{kind} breakdown must account for the whole folder.");
+    }
+    Assert(FolderBreakdown.Create(result.Root, BreakdownKind.Children, 1, DateTimeOffset.UtcNow).Single().IsOther, "Surplus slices must fold into 'other'.");
+
+    var shallowCsvPath = Path.Combine(testRoot, "shallow.csv");
+    var shallow = await exporter.ExportCsvAsync(result, shallowCsvPath, new ExportOptions { MaximumDepth = 1, IncludeFiles = false });
+    Assert(shallow.RowsWritten == 3 && File.ReadAllLines(shallowCsvPath).Length == 4, "Depth-1 folder export should list the root and its two folders.");
+    var reports = new ReportExportService();
+    var xlsxPath = Path.Combine(testRoot, "scan.xlsx");
+    var xlsx = await reports.ExportXlsxAsync(result, xlsxPath, new ExportOptions());
+    Assert(xlsx.RowsWritten == 7 && !xlsx.IsTruncated, $"Excel export should write 7 rows (root, 2 folders, 4 files), wrote {xlsx.RowsWritten}.");
+    using (var workbook = System.IO.Compression.ZipFile.OpenRead(xlsxPath))
+    {
+        foreach (var part in new[] { "xl/workbook.xml", "xl/styles.xml", "xl/worksheets/sheet1.xml", "xl/worksheets/sheet2.xml" })
+        {
+            using var reader = new StreamReader(workbook.GetEntry(part)!.Open());
+            var document = System.Xml.Linq.XDocument.Parse(await reader.ReadToEndAsync());
+            Assert(document.Root is not null, $"{part} must be well-formed XML.");
+            if (part.EndsWith("sheet1.xml", StringComparison.Ordinal))
+            {
+                Assert(document.ToString().Contains("unique.txt", StringComparison.Ordinal), "Excel export is missing a file.");
+            }
+        }
+    }
+    var cappedXlsx = await reports.ExportXlsxAsync(result, Path.Combine(testRoot, "capped.xlsx"), new ExportOptions { MaximumRows = 2 });
+    Assert(cappedXlsx.RowsWritten == 2 && cappedXlsx.IsTruncated, "A row limit must truncate the export and say so.");
+    var htmlPath = Path.Combine(testRoot, "scan.html");
+    var html = await reports.ExportHtmlAsync(result, htmlPath, new ExportOptions { MaximumDepth = 1 });
+    var htmlText = await File.ReadAllTextAsync(htmlPath);
+    Assert(html.RowsWritten == 3 && htmlText.Contains("Second", StringComparison.Ordinal) && !htmlText.Contains("unique.txt", StringComparison.Ordinal),
+        "Depth-1 HTML report should show the top folders but not the files inside them.");
+    var escapedRoot = new ScanNode { Name = "<b>&", FullPath = "C:\\<b>&", IsDirectory = true };
+    var (escapedHtml, _) = ReportExportService.BuildHtml(new ScanResult(escapedRoot, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, [], [], []), new ExportOptions(), new ReportText(), System.Globalization.CultureInfo.InvariantCulture);
+    Assert(!escapedHtml.Contains("<b>&", StringComparison.Ordinal) && escapedHtml.Contains("&lt;b&gt;&amp;", StringComparison.Ordinal), "HTML report must escape file names.");
+
+    var fileOperations = new FileOperationService();
+    var copyTarget = Directory.CreateDirectory(Path.Combine(testRoot, "CopyTarget")).FullName;
+    var copied = await fileOperations.CopyAsync([Path.Combine(secondDirectory.FullName, "unique.txt")], copyTarget, nint.Zero);
+    Assert(copied.Succeeded && File.Exists(Path.Combine(copyTarget, "unique.txt")) && File.Exists(Path.Combine(secondDirectory.FullName, "unique.txt")), "Copy must leave the source and create the target.");
+    var moveTarget = Directory.CreateDirectory(Path.Combine(testRoot, "MoveTarget")).FullName;
+    var moved = await fileOperations.MoveAsync([Path.Combine(copyTarget, "unique.txt")], moveTarget, nint.Zero);
+    Assert(moved.Succeeded && File.Exists(Path.Combine(moveTarget, "unique.txt")) && !File.Exists(Path.Combine(copyTarget, "unique.txt")), "Move must remove the source.");
+
     var driveRoot = new ScanNode { Name = "C:\\", FullPath = "C:\\", IsDirectory = true };
     driveRoot.Children.Add(new ScanNode { Name = "Windows", FullPath = "C:\\Windows", IsDirectory = true });
     var driveResult = new ScanResult(driveRoot, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, [], [], []);
@@ -200,4 +296,10 @@ static partial class NativeTestMethods
     [DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", SetLastError = true, CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool CreateHardLink(string fileName, string existingFileName, IntPtr securityAttributes);
+}
+
+// Progress<T> posts to the thread pool; tests need every report delivered before ScanAsync returns.
+sealed class SynchronousProgress<T>(Action<T> handler) : IProgress<T>
+{
+    public void Report(T value) => handler(value);
 }

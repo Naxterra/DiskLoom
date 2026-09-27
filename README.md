@@ -22,12 +22,18 @@ The reusable scanning engine is published as `Naxterra.DiskLoom.Core` under [Git
 - Logical size and Windows allocation-size (“size on disk”) accounting
 - Safe default handling of junctions/symlinks, hidden/system files, exclusions, access failures, and files changing during a scan
 - Fluent Windows 11 UI with Mica, system light/dark theme, folder tree, sortable details, treemap, and drive overview
+- Results while scanning: top-level folders and their growing sizes appear within a second, long before a large drive finishes
+- Share-of-parent bars in the folder tree and results list; drives show how full they are
+- Configurable, reorderable result columns (size, size on disk, % of parent, files, folders, modified, created, last accessed, type, attributes), remembered between sessions
+- Pie/ring and bar charts of a folder by subfolder, extension, file type, or age
+- Tree filter by file type, name pattern, or age: folder sizes, tree, treemap, and charts then count only matching files
 - Complete English and German UI with a persistent language switch under **Settings**
 - Largest-file, extension, file-age, and review-first cleanup insights
 - Duplicate detection with size grouping, first/last block sampling, then full SHA-256 verification
-- Name/path filtering, recursive search, Explorer reveal, copy path, Recycle Bin, and explicit permanent deletion
+- Name/path filtering and whole-scan search by name wildcards, file type, size range, and modification date
+- Open, Explorer reveal, Properties, copy path, Copy to…/Move to… (Explorer's own copy engine with progress, conflict prompts, and Undo), Recycle Bin, and explicit permanent deletion
 - Compressed `.diskloom` snapshots and size-delta comparison
-- Complete CSV and JSON export
+- CSV, JSON, Excel (.xlsx), HTML, and PDF export of the whole scan or the current folder, with a folder-depth limit and an option to leave out files
 - `DiskLoom.Cli.exe` for scheduled/headless scans, exports, snapshots, and duplicate reports
 - Self-contained x64 portable output and WiX MSI with selectable Start-menu/Desktop shortcuts, Apps & Features, major upgrades, and Explorer folder/drive context menus
 - Opt-in auto-update client: HTTPS only, SHA-256 checked, Windows Authenticode chain checked, and publisher-certificate pinned
@@ -35,7 +41,7 @@ The reusable scanning engine is published as `Naxterra.DiskLoom.Core` under [Git
 
 ## Deliberate v1 boundaries
 
-The current scanner uses parallel Win32/.NET directory enumeration. Direct raw-NTFS MFT parsing, MTP devices, SSH, WebDAV URLs, and provider-specific cloud APIs are not presented as finished features. Mapped/cloud-synced folders and ordinary UNC/WebDAV-mounted paths work through the Windows filesystem. PDF/Excel reports and owner statistics are also roadmap items; CSV/JSON and snapshots are implemented now.
+The current scanner uses parallel Win32/.NET directory enumeration. Direct raw-NTFS MFT parsing, MTP devices, SSH, WebDAV URLs, and provider-specific cloud APIs are not presented as finished features. Mapped/cloud-synced folders and ordinary UNC/WebDAV-mounted paths work through the Windows filesystem. Owner/permission statistics are out of scope.
 
 This distinction matters: DiskLoom 0.1 is a usable local/UNC replacement for the common disk-analysis workflow, not yet a claim of byte-for-byte parity with every feature accumulated by TreeSize Professional.
 
@@ -59,6 +65,7 @@ The ready-to-install MSI is written to `artifacts\DiskLoom\installer\DiskLoom-Se
 
 ```powershell
 DiskLoom.Cli.exe --scan "D:\Data" --export "D:\Reports\disk.csv" --snapshot "D:\Reports\disk.diskloom"
+DiskLoom.Cli.exe --scan "E:\" --export "D:\Reports\usb.xlsx" --depth 3 --no-files
 DiskLoom.Cli.exe --scan "\\server\share" --duplicates "D:\Reports\duplicates.csv" --min-duplicate-mb 10
 ```
 

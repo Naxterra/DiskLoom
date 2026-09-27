@@ -158,11 +158,92 @@ public sealed class FileOperationService
     public bool ShowProperties(nint ownerWindow, string path) =>
         OperatingSystem.IsWindows() && SHObjectProperties(ownerWindow, ShopFilePath, path, null);
 
+    // Copies or moves with Explorer's own engine: progress dialog, name-conflict prompts,
+    // cross-volume moves and Undo in Explorer all behave exactly as in File Explorer.
+    public Task<ShellFileOperationResult> CopyAsync(IReadOnlyList<string> sources, string destinationFolder, nint ownerWindow) =>
+        RunShellFileOperationAsync(FoCopy, sources, destinationFolder, ownerWindow);
+
+    public Task<ShellFileOperationResult> MoveAsync(IReadOnlyList<string> sources, string destinationFolder, nint ownerWindow) =>
+        RunShellFileOperationAsync(FoMove, sources, destinationFolder, ownerWindow);
+
+    private static Task<ShellFileOperationResult> RunShellFileOperationAsync(uint operation, IReadOnlyList<string> sources, string destinationFolder, nint ownerWindow)
+    {
+        ArgumentNullException.ThrowIfNull(sources);
+        ArgumentException.ThrowIfNullOrWhiteSpace(destinationFolder);
+        if (sources.Count == 0)
+        {
+            return Task.FromResult(new ShellFileOperationResult(0, Aborted: false));
+        }
+        if (!Directory.Exists(destinationFolder))
+        {
+            throw new DirectoryNotFoundException(destinationFolder);
+        }
+
+        var completion = new TaskCompletionSource<ShellFileOperationResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        // The shell's progress and conflict dialogs need a single-threaded apartment, and the
+        // call blocks until the user has finished with them, so it gets its own thread.
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var fileOperation = new ShFileOperation
+                {
+                    Owner = ownerWindow,
+                    Function = operation,
+                    // Both lists are double-null-terminated; the marshaller adds the final null.
+                    From = string.Join('\0', sources.Select(Path.GetFullPath)) + '\0',
+                    To = Path.GetFullPath(destinationFolder) + '\0',
+                    Flags = FofAllowUndo | FofNoConfirmMkdir
+                };
+                var error = SHFileOperation(ref fileOperation);
+                completion.TrySetResult(new ShellFileOperationResult(error, fileOperation.AnyOperationsAborted));
+            }
+            catch (Exception exception)
+            {
+                completion.TrySetException(exception);
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "DiskLoom shell file operation"
+        };
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        return completion.Task;
+    }
+
+    private const uint FoMove = 0x0001;
+    private const uint FoCopy = 0x0002;
+    private const ushort FofNoConfirmMkdir = 0x0200;
+    private const ushort FofAllowUndo = 0x0040;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ShFileOperation
+    {
+        public nint Owner;
+        public uint Function;
+        [MarshalAs(UnmanagedType.LPWStr)] public string From;
+        [MarshalAs(UnmanagedType.LPWStr)] public string? To;
+        public ushort Flags;
+        [MarshalAs(UnmanagedType.Bool)] public bool AnyOperationsAborted;
+        public nint NameMappings;
+        [MarshalAs(UnmanagedType.LPWStr)] public string? ProgressTitle;
+    }
+
+    [DllImport("shell32.dll", EntryPoint = "SHFileOperationW", CharSet = CharSet.Unicode)]
+    private static extern int SHFileOperation(ref ShFileOperation fileOperation);
+
     private const uint ShopFilePath = 0x2;
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SHObjectProperties(nint ownerWindow, uint objectType, string objectName, string? propertyPage);
+}
+
+// ErrorCode is the shell's return value (0 = success); Aborted = the user canceled part of it.
+public sealed record ShellFileOperationResult(int ErrorCode, bool Aborted)
+{
+    public bool Succeeded => ErrorCode == 0 && !Aborted;
 }
 
 public static class ByteFormatter

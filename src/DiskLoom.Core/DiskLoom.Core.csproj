@@ -15,6 +15,9 @@
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="DiskLoom.Core.SmokeTests" />
+  </ItemGroup>
+  <ItemGroup>
     <None Include="..\DiskLoom\README.md" Pack="true" PackagePath="\" Link="README.md" />
   </ItemGroup>
 </Project>

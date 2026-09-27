@@ -46,6 +46,10 @@ public sealed class FileSystemScanner
         var visitedTargets = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
         var physicalFiles = new ConcurrentDictionary<FileIdentity, byte>();
         visitedTargets.TryAdd(normalizedPath, 0);
+        var rootListed = 0;
+        var liveProgress = progress is null
+            ? null
+            : new LiveScanProgress(progress, () => Volatile.Read(ref rootListed) == 1, () => CreateLiveSnapshot(root));
 
         await channel.Writer.WriteAsync(root, cancellationToken).ConfigureAwait(false);
 
@@ -70,11 +74,17 @@ public sealed class FileSystemScanner
                             ref bytesScanned,
                             ref lastProgressTick,
                             stopwatch,
-                            progress,
+                            liveProgress,
                             cancellationToken);
                     }
                     finally
                     {
+                        if (ReferenceEquals(directory, root))
+                        {
+                            // The root's child list is complete and no longer written to,
+                            // so live snapshots may read it from now on.
+                            Volatile.Write(ref rootListed, 1);
+                        }
                         if (Interlocked.Decrement(ref pendingDirectories) == 0)
                         {
                             channel.Writer.TryComplete();
@@ -89,7 +99,7 @@ public sealed class FileSystemScanner
 
         AggregateDirectories(root);
         SortChildren(root);
-        var (extensions, ages) = BuildStatistics(root, DateTimeOffset.UtcNow);
+        var (extensions, ages) = ScanStatistics.Build(root, DateTimeOffset.UtcNow);
         progress?.Report(new ScanProgress(root.FullPath, filesScanned, directoriesScanned, bytesScanned, stopwatch.Elapsed));
 
         return new ScanResult(
@@ -138,6 +148,15 @@ public sealed class FileSystemScanner
                     if (entry.IsDirectory)
                     {
                         var child = CreateDirectoryNode(entry);
+                        if (directory.Live is { } parentTotals)
+                        {
+                            child.Live = parentTotals;
+                            Interlocked.Increment(ref parentTotals.FolderCount);
+                        }
+                        else
+                        {
+                            child.Live = new LiveTotals();
+                        }
                         directory.Children.Add(child);
 
                         if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)
@@ -218,6 +237,12 @@ public sealed class FileSystemScanner
                             HardLinkCount = storage.HardLinkCount,
                             IsAdditionalHardLink = additionalHardLink
                         });
+                        if (directory.Live is { } totals)
+                        {
+                            Interlocked.Add(ref totals.Size, size);
+                            Interlocked.Add(ref totals.AllocatedSize, allocated);
+                            Interlocked.Increment(ref totals.FileCount);
+                        }
                         Interlocked.Increment(ref filesScanned);
                         Interlocked.Add(ref bytesScanned, size);
                     }
@@ -392,59 +417,55 @@ public sealed class FileSystemScanner
         }
     }
 
-    private static (IReadOnlyList<ExtensionStatistic> Extensions, IReadOnlyList<AgeStatistic> Ages) BuildStatistics(
-        ScanNode root,
-        DateTimeOffset now)
+    // Called on a worker thread; reads only the finished root list and the atomic live totals.
+    private static IReadOnlyList<ScanNode> CreateLiveSnapshot(ScanNode root)
     {
-        var extensions = new Dictionary<string, ExtensionAccumulator>(StringComparer.OrdinalIgnoreCase);
-        var ageLabels = new[]
+        var children = root.Children;
+        var snapshot = new ScanNode[children.Count];
+        for (var index = 0; index < snapshot.Length; index++)
         {
-            "Today",
-            "2–7 days",
-            "8–30 days",
-            "1–6 months",
-            "6–12 months",
-            "Older than a year"
-        };
-        var ageSizes = new long[ageLabels.Length];
-        var ageCounts = new long[ageLabels.Length];
-
-        foreach (var file in root.Files())
-        {
-            var extension = string.IsNullOrEmpty(file.Extension) ? "(no extension)" : file.Extension;
-            if (!extensions.TryGetValue(extension, out var aggregate))
+            var child = children[index];
+            var live = child.IsDirectory ? child.Live : null;
+            snapshot[index] = new ScanNode
             {
-                aggregate = new ExtensionAccumulator();
-                extensions.Add(extension, aggregate);
-            }
-            aggregate.Size += file.Size;
-            aggregate.AllocatedSize += file.AllocatedSize;
-            aggregate.FileCount++;
-
-            var age = now - file.LastWriteUtc;
-            var ageIndex = age < TimeSpan.FromDays(1) ? 0
-                : age < TimeSpan.FromDays(8) ? 1
-                : age < TimeSpan.FromDays(31) ? 2
-                : age < TimeSpan.FromDays(183) ? 3
-                : age < TimeSpan.FromDays(366) ? 4
-                : 5;
-            ageSizes[ageIndex] += file.Size;
-            ageCounts[ageIndex]++;
+                Name = child.Name,
+                FullPath = child.FullPath,
+                IsDirectory = child.IsDirectory,
+                Size = live is null ? child.Size : Interlocked.Read(ref live.Size),
+                AllocatedSize = live is null ? child.AllocatedSize : Interlocked.Read(ref live.AllocatedSize),
+                FileCount = live is null ? child.FileCount : Interlocked.Read(ref live.FileCount),
+                FolderCount = live is null ? child.FolderCount : Interlocked.Read(ref live.FolderCount),
+                CreatedUtc = child.CreatedUtc,
+                LastWriteUtc = child.LastWriteUtc,
+                LastAccessUtc = child.LastAccessUtc,
+                Attributes = child.Attributes
+            };
         }
-
-        var total = Math.Max(1, root.Size);
-        var extensionStatistics = extensions
-            .Select(pair => new ExtensionStatistic(pair.Key, pair.Value.Size, pair.Value.AllocatedSize, pair.Value.FileCount)
-            {
-                Percentage = pair.Value.Size * 100d / total
-            })
-            .OrderByDescending(static statistic => statistic.Size)
-            .ToArray();
-        var ageStatistics = ageLabels
-            .Select((label, index) => new AgeStatistic(label, ageSizes[index], ageCounts[index]))
-            .ToArray();
-        return (extensionStatistics, ageStatistics);
+        return snapshot;
     }
+
+    // Adds a fresh top-level snapshot to at most ~2 progress reports per second.
+    private sealed class LiveScanProgress(IProgress<ScanProgress> inner, Func<bool> isReady, Func<IReadOnlyList<ScanNode>> snapshot) : IProgress<ScanProgress>
+    {
+        private long _lastSnapshotTick;
+
+        public void Report(ScanProgress value)
+        {
+            var now = Environment.TickCount64;
+            var previous = Interlocked.Read(ref _lastSnapshotTick);
+            if (now - previous >= LiveSnapshotIntervalMilliseconds &&
+                isReady() &&
+                Interlocked.CompareExchange(ref _lastSnapshotTick, now, previous) == previous)
+            {
+                value = value with { TopLevel = snapshot() };
+            }
+            inner.Report(value);
+        }
+    }
+
+    // Internal so the smoke tests can report every entry instead of waiting on the clock.
+    internal static long ProgressIntervalMilliseconds = 125;
+    internal static long LiveSnapshotIntervalMilliseconds = 450;
 
     private static void ReportProgressIfDue(
         string currentPath,
@@ -462,7 +483,7 @@ public sealed class FileSystemScanner
 
         var now = Environment.TickCount64;
         var previous = Interlocked.Read(ref lastProgressTick);
-        if (now - previous < 125 || Interlocked.CompareExchange(ref lastProgressTick, now, previous) != previous)
+        if (now - previous < ProgressIntervalMilliseconds || Interlocked.CompareExchange(ref lastProgressTick, now, previous) != previous)
         {
             return;
         }
@@ -499,13 +520,6 @@ public sealed class FileSystemScanner
         uint ReparsePointTag,
         uint VolumeSerialNumber,
         bool HasNativeAllocation);
-
-    private sealed class ExtensionAccumulator
-    {
-        public long Size;
-        public long AllocatedSize;
-        public long FileCount;
-    }
 
     private static class NativeDirectoryReader
     {
