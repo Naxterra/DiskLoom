@@ -51,15 +51,20 @@ internal static class DiskLoomCli
             var exporter = new ExportService();
             if (!string.IsNullOrWhiteSpace(options.ExportPath))
             {
-                if (Path.GetExtension(options.ExportPath).Equals(".json", StringComparison.OrdinalIgnoreCase))
+                var exportOptions = new ExportOptions { MaximumDepth = options.Depth, IncludeFiles = options.IncludeFiles };
+                var reports = new ReportExportService();
+                ExportSummary? summary = Path.GetExtension(options.ExportPath).ToLowerInvariant() switch
+                {
+                    ".json" => null,
+                    ".xlsx" => await reports.ExportXlsxAsync(result, options.ExportPath, exportOptions, cancellationToken: cancellation.Token),
+                    ".html" or ".htm" => await reports.ExportHtmlAsync(result, options.ExportPath, exportOptions, cancellationToken: cancellation.Token),
+                    _ => await exporter.ExportCsvAsync(result, options.ExportPath, exportOptions, cancellation.Token)
+                };
+                if (summary is null)
                 {
                     await exporter.ExportJsonAsync(result, options.ExportPath, cancellation.Token);
                 }
-                else
-                {
-                    await exporter.ExportCsvAsync(result, options.ExportPath, cancellation.Token);
-                }
-                Console.WriteLine($"Exported: {Path.GetFullPath(options.ExportPath)}");
+                Console.WriteLine($"Exported: {Path.GetFullPath(options.ExportPath)}{(summary is null ? string.Empty : $" ({summary.RowsWritten:N0} rows{(summary.IsTruncated ? ", truncated" : string.Empty)})")}");
             }
 
             if (!string.IsNullOrWhiteSpace(options.SnapshotPath))
@@ -103,6 +108,8 @@ internal static class DiskLoomCli
         var parallelism = Math.Clamp(Environment.ProcessorCount, 2, 32);
         var minimumDuplicateBytes = 1024L * 1024;
         var followLinks = false;
+        int? depth = null;
+        var includeFiles = true;
 
         for (var index = 0; index < args.Count; index++)
         {
@@ -126,6 +133,8 @@ internal static class DiskLoomCli
                 case "--parallel": parallelism = Math.Clamp(int.Parse(NextValue()), 1, 32); break;
                 case "--min-duplicate-mb": minimumDuplicateBytes = checked((long)(double.Parse(NextValue(), System.Globalization.CultureInfo.InvariantCulture) * 1024 * 1024)); break;
                 case "--follow-links": followLinks = true; break;
+                case "--depth": depth = Math.Max(0, int.Parse(NextValue(), System.Globalization.CultureInfo.InvariantCulture)); break;
+                case "--no-files": includeFiles = false; break;
                 default: throw new ArgumentException($"Unknown option: {argument}");
             }
         }
@@ -134,7 +143,7 @@ internal static class DiskLoomCli
         {
             throw new ArgumentException("--scan PATH is required.");
         }
-        return new CliOptions(scanPath, exportPath, snapshotPath, duplicatesPath, excludes, parallelism, minimumDuplicateBytes, followLinks);
+        return new CliOptions(scanPath, exportPath, snapshotPath, duplicatesPath, excludes, parallelism, minimumDuplicateBytes, followLinks, depth, includeFiles);
     }
 
     private static async Task ExportDuplicatesAsync(DuplicateResult result, string path, CancellationToken cancellationToken)
@@ -171,7 +180,9 @@ internal static class DiskLoomCli
               DiskLoom.Cli --scan PATH [options]
 
             Options:
-              --export FILE             Export the complete scan as .csv or .json
+              --export FILE             Export the scan as .csv, .xlsx, .html or .json
+              --depth NUMBER            Folder levels to export (csv/xlsx/html; default: all)
+              --no-files                Export folders only (csv/xlsx/html)
               --snapshot FILE           Save a compressed .diskloom snapshot
               --duplicates FILE         Verify duplicates and export them as CSV
               --min-duplicate-mb NUMBER Ignore smaller files (default: 1 MB)
@@ -192,7 +203,9 @@ internal static class DiskLoomCli
         IReadOnlyList<string> Excludes,
         int Parallelism,
         long MinimumDuplicateBytes,
-        bool FollowLinks);
+        bool FollowLinks,
+        int? Depth,
+        bool IncludeFiles);
 
     private static string Truncate(this string value, int length) => value.Length <= length ? value : "…" + value[^Math.Max(1, length - 1)..];
 }

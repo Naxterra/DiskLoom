@@ -46,23 +46,23 @@ public sealed partial class MainPage : Page
     private FolderTreeRow? _treeContextRow;
     private ListView? _fileMenuList;
     private bool _loaded;
-    private SortColumn _sortColumn = SortColumn.Size;
+    private ResultSortColumn _sortColumn = ResultSortColumn.Size;
     private bool _sortDescending = true;
     private bool _syncingSortControls;
     private bool _syncingDrivePicker;
     private bool _syncingTreeSelection;
     private bool _updatingTree;
     private bool _notificationShowsIssues;
-    private int _lastNonIssuesTab;
+    private object? _lastNonIssuesTab;
     private int _navigationIndex = -1;
     private long _scanRequestId;
 
-    public ResultColumnLayout ResultColumns { get; } = new();
+    public ResultColumnLayout ResultColumnWidths { get; } = new();
 
     public MainPage()
     {
         InitializeComponent();
-        foreach (var list in new[] { ChildrenList, LargestFilesList, InsightsList, DuplicatesList })
+        foreach (var list in new[] { ChildrenList, LargestFilesList, InsightsList, DuplicatesList, SearchResultsList })
         {
             list.ContextFlyout = FileActionsMenu;
         }
@@ -81,12 +81,8 @@ public sealed partial class MainPage : Page
         ToolTipService.SetToolTip(UpButton, LocalizationService.Get("UpOneLevel"));
         ToolTipService.SetToolTip(EditPathButton, LocalizationService.Get("EditPath"));
         ToolTipService.SetToolTip(TreeSplitter, LocalizationService.Get("TreeSplitterTip"));
-        var columnResizeTip = LocalizationService.Get("ResultColumnResizeTip");
-        foreach (var splitter in new[] { NameColumnSplitter, SizeColumnSplitter, AllocatedColumnSplitter, ModifiedColumnSplitter })
-        {
-            ToolTipService.SetToolTip(splitter, columnResizeTip);
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(splitter, columnResizeTip);
-        }
+        ApplyResultColumns(ResultColumns.Load());
+        InitializeFeatureControls();
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(BackButton, LocalizationService.Get("Back"));
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ForwardButton, LocalizationService.Get("Forward"));
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(UpButton, LocalizationService.Get("UpOneLevel"));
@@ -223,6 +219,17 @@ public sealed partial class MainPage : Page
             }
             StatusText.Text = value.CurrentPath;
             StatusDetailText.Text = LocalizationService.Format("ScanProgressDetail", value.FilesScanned, ByteFormatter.Format(value.BytesScanned), value.Elapsed);
+            if (_currentNode is null)
+            {
+                LogicalSizeText.Text = ByteFormatter.Format(value.BytesScanned);
+                FilesText.Text = value.FilesScanned.ToString("N0");
+                // The final count excludes the scanned folder itself.
+                FoldersText.Text = Math.Max(0, value.DirectoriesScanned - 1).ToString("N0");
+                if (value.TopLevel is { } topLevel)
+                {
+                    ShowLiveResults(topLevel);
+                }
+            }
         });
 
         try
@@ -247,6 +254,7 @@ public sealed partial class MainPage : Page
         {
             if (requestId == Volatile.Read(ref _scanRequestId))
             {
+                ClearLiveResults();
                 StatusText.Text = LocalizationService.Get("ScanCanceled");
                 StatusDetailText.Text = string.Empty;
             }
@@ -255,6 +263,7 @@ public sealed partial class MainPage : Page
         {
             if (requestId == Volatile.Read(ref _scanRequestId))
             {
+                ClearLiveResults();
                 StatusText.Text = LocalizationService.Get("ScanFailed");
                 StatusDetailText.Text = string.Empty;
                 ShowNotification(exception.Message, InfoBarSeverity.Error);
@@ -282,13 +291,9 @@ public sealed partial class MainPage : Page
     private void ActivateScanResult(ScanPresentation presentation, bool loadedFromCache)
     {
         var result = presentation.Result;
-        _scanResult = result;
-        _nodesByPath.Clear();
-        _parentsByPath.Clear();
-        IndexScanNodes(result.Root, parent: null);
-
-        PopulateScan(presentation);
-        ShowNode(result.Root);
+        _basePresentation = presentation;
+        ResetTreeFilterState();
+        DisplayPresentation(presentation, preferredPath: null);
         StatusText.Text = loadedFromCache
             ? LocalizationService.Format("CachedScanLoaded", result.Root.FullPath)
             : LocalizationService.Format("ScanComplete", result.Root.FullPath);
@@ -302,6 +307,23 @@ public sealed partial class MainPage : Page
         {
             ShowNotification(DescribeIssues(result.Issues), InfoBarSeverity.Warning, showIssuesAction: true);
         }
+    }
+
+    // Shows a scan (or a filtered copy of it) and opens preferredPath if it is part of it.
+    private void DisplayPresentation(ScanPresentation presentation, string? preferredPath)
+    {
+        var result = presentation.Result;
+        _scanResult = result;
+        ClearLiveResults();
+        _nodesByPath.Clear();
+        _parentsByPath.Clear();
+        IndexScanNodes(result.Root, parent: null);
+        // History entries point at nodes of the previous tree.
+        _navigationHistory.Clear();
+        _navigationIndex = -1;
+
+        PopulateScan(presentation);
+        ShowNode(preferredPath is not null && _nodesByPath.TryGetValue(preferredPath, out var preferred) ? preferred : result.Root);
     }
 
     private void PopulateScan(ScanPresentation presentation)
@@ -329,6 +351,7 @@ public sealed partial class MainPage : Page
                 : LocalizationService.Format("IssuesRecorded", result.Issues.Count);
 
         RefreshButton.IsEnabled = true;
+        FilterButton.IsEnabled = true;
         ExportButton.IsEnabled = true;
         SaveSnapshotButton.IsEnabled = true;
         CompareButton.IsEnabled = true;
@@ -379,7 +402,8 @@ public sealed partial class MainPage : Page
         foreach (var path in GetPathChain(result.Root.FullPath))
         {
             _nodesByPath.TryGetValue(path, out var scannedNode);
-            var treeNode = CreateTreeNode(path, scannedNode, parentTreeNode is null ? drive : null);
+            var parentSize = (parentTreeNode?.Content as FolderTreeRow)?.Source?.Size ?? 0;
+            var treeNode = CreateTreeNode(path, scannedNode, parentTreeNode is null ? drive : null, parentSize);
             if (parentTreeNode is null)
             {
                 DirectoryTree.RootNodes.Add(treeNode);
@@ -398,11 +422,11 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private TreeViewNode CreateTreeNode(string fullPath, ScanNode? node, DriveSummary? drive = null)
+    private TreeViewNode CreateTreeNode(string fullPath, ScanNode? node, DriveSummary? drive = null, long parentSize = 0)
     {
         var treeNode = new TreeViewNode
         {
-            Content = drive is null ? new FolderTreeRow(fullPath, node) : new FolderTreeRow(drive, node),
+            Content = drive is null ? new FolderTreeRow(fullPath, node, parentSize) : new FolderTreeRow(drive, node),
             HasUnrealizedChildren = node?.Children.Any(static child => child.IsDirectory) == true
         };
         _treeNodesByPath[fullPath] = treeNode;
@@ -433,7 +457,7 @@ public sealed partial class MainPage : Page
             {
                 foreach (var child in source.Children.Where(static child => child.IsDirectory))
                 {
-                    treeNode.Children.Add(CreateTreeNode(child.FullPath, child));
+                    treeNode.Children.Add(CreateTreeNode(child.FullPath, child, parentSize: source.Size));
                 }
             }
         }
@@ -528,6 +552,8 @@ public sealed partial class MainPage : Page
         var canDelete = row is not null && CanDeleteTreeFolder(row);
         TreeRecycleMenuItem.IsEnabled = canDelete;
         TreeDeleteMenuItem.IsEnabled = canDelete;
+        TreeCopyToMenuItem.IsEnabled = row?.Source is not null && Directory.Exists(row.FullPath);
+        TreeMoveToMenuItem.IsEnabled = canDelete;
     }
 
     private FolderTreeRow? GetTreeContextRow() =>
@@ -688,6 +714,7 @@ public sealed partial class MainPage : Page
         UpdateNavigationButtons();
         ApplyFilter();
         RenderTreemap();
+        RefreshChartIfVisible();
     }
 
     private void AddNavigationEntry(ScanNode node)
@@ -943,30 +970,38 @@ public sealed partial class MainPage : Page
             return;
         }
 
+        if (_currentNode is null && _liveTopLevel is { } liveTopLevel)
+        {
+            ShowLiveResults(liveTopLevel);
+            return;
+        }
+
         if (_currentNode is null || IsDeletedByApp(_currentNode))
         {
             ChildrenList.ItemsSource = null;
             return;
         }
 
-        var query = FilterBox.Text.Trim();
-        IEnumerable<ScanNode> nodes = _currentNode.Children;
-        if (!string.IsNullOrWhiteSpace(query))
-        {
-            nodes = nodes.Where(node =>
-                node.Name.Contains(query, StringComparison.CurrentCultureIgnoreCase) ||
-                node.FullPath.Contains(query, StringComparison.CurrentCultureIgnoreCase));
-        }
-
-        nodes = SortNodes(nodes);
+        var nodes = SortNodes(FilterByQuery(_currentNode.Children));
 
         // Hide items this session deleted; a per-row disk check froze the UI for seconds in large folders.
         const bool displayAllocated = DisplayAllocatedMeasurements;
+        var parentSize = _currentNode.Size;
         ChildrenList.ItemsSource = nodes
             .Where(node => !_deletedPaths.Contains(node.FullPath))
             .Take(100_000)
-            .Select(node => new NodeRow(node, displayAllocated, ResultColumns))
+            .Select(node => new NodeRow(node, displayAllocated, ResultColumnWidths, parentSize))
             .ToArray();
+    }
+
+    private IEnumerable<ScanNode> FilterByQuery(IEnumerable<ScanNode> nodes)
+    {
+        var query = FilterBox.Text.Trim();
+        return string.IsNullOrWhiteSpace(query)
+            ? nodes
+            : nodes.Where(node =>
+                node.Name.Contains(query, StringComparison.CurrentCultureIgnoreCase) ||
+                node.FullPath.Contains(query, StringComparison.CurrentCultureIgnoreCase));
     }
 
     private bool IsDeletedByApp(ScanNode node)
@@ -990,8 +1025,7 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        // ApplyFilter() verifies each row still exists on disk, which is real I/O.
-        // Debounce so that typing does not run it on every keystroke.
+        // Rebuilding the rows of a large folder on every keystroke makes typing lag.
         _filterDebounceTimer ??= CreateFilterDebounceTimer();
         _filterDebounceTimer.Stop();
         _filterDebounceTimer.Start();
@@ -1013,8 +1047,8 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        _sortColumn = (SortColumn)SortBox.SelectedIndex;
-        _sortDescending = _sortColumn != SortColumn.Name;
+        _sortColumn = (ResultSortColumn)SortBox.SelectedIndex;
+        _sortDescending = !IsTextSort(_sortColumn);
         UpdateSortIndicators();
         ApplyFilter();
     }
@@ -1028,11 +1062,12 @@ public sealed partial class MainPage : Page
 
     private void SortHeader_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not FrameworkElement { Tag: string tag } || !Enum.TryParse<SortColumn>(tag, out var selectedColumn))
+        if (sender is not FrameworkElement { Tag: string tag } || !Enum.TryParse<ResultColumnKey>(tag, out var key))
         {
             return;
         }
 
+        var selectedColumn = ResultColumns.Get(key).Sort;
         if (_sortColumn == selectedColumn)
         {
             _sortDescending = !_sortDescending;
@@ -1040,7 +1075,7 @@ public sealed partial class MainPage : Page
         else
         {
             _sortColumn = selectedColumn;
-            _sortDescending = selectedColumn != SortColumn.Name;
+            _sortDescending = !IsTextSort(selectedColumn);
         }
 
         _syncingSortControls = true;
@@ -1050,38 +1085,55 @@ public sealed partial class MainPage : Page
         ApplyFilter();
     }
 
-    private IEnumerable<ScanNode> SortNodes(IEnumerable<ScanNode> nodes) => (_sortColumn, _sortDescending) switch
+    private static bool IsTextSort(ResultSortColumn column) =>
+        column is ResultSortColumn.Name or ResultSortColumn.Type or ResultSortColumn.Attributes;
+
+    private IEnumerable<ScanNode> SortNodes(IEnumerable<ScanNode> nodes)
     {
-        (SortColumn.Name, false) => nodes.OrderBy(static node => node.Name, StringComparer.CurrentCultureIgnoreCase),
-        (SortColumn.Name, true) => nodes.OrderByDescending(static node => node.Name, StringComparer.CurrentCultureIgnoreCase),
-        (SortColumn.Size, false) => nodes.OrderBy(static node => node.Size),
-        (SortColumn.Size, true) => nodes.OrderByDescending(static node => node.Size),
-        (SortColumn.Allocated, false) => nodes.OrderBy(static node => node.AllocatedSize),
-        (SortColumn.Allocated, true) => nodes.OrderByDescending(static node => node.AllocatedSize),
-        (SortColumn.Modified, false) => nodes.OrderBy(static node => node.LastWriteUtc),
-        (SortColumn.Modified, true) => nodes.OrderByDescending(static node => node.LastWriteUtc),
-        (SortColumn.FileCount, false) => nodes.OrderBy(static node => node.FileCount),
-        _ => nodes.OrderByDescending(static node => node.FileCount)
-    };
+        var text = StringComparer.CurrentCultureIgnoreCase;
+        return (_sortColumn, _sortDescending) switch
+        {
+            (ResultSortColumn.Name, false) => nodes.OrderBy(static node => node.Name, text),
+            (ResultSortColumn.Name, true) => nodes.OrderByDescending(static node => node.Name, text),
+            (ResultSortColumn.Size, false) => nodes.OrderBy(static node => node.Size),
+            (ResultSortColumn.Size, true) => nodes.OrderByDescending(static node => node.Size),
+            (ResultSortColumn.Allocated, false) => nodes.OrderBy(static node => node.AllocatedSize),
+            (ResultSortColumn.Allocated, true) => nodes.OrderByDescending(static node => node.AllocatedSize),
+            (ResultSortColumn.Modified, false) => nodes.OrderBy(static node => node.LastWriteUtc),
+            (ResultSortColumn.Modified, true) => nodes.OrderByDescending(static node => node.LastWriteUtc),
+            (ResultSortColumn.FileCount, false) => nodes.OrderBy(static node => node.FileCount),
+            (ResultSortColumn.FileCount, true) => nodes.OrderByDescending(static node => node.FileCount),
+            (ResultSortColumn.FolderCount, false) => nodes.OrderBy(static node => node.FolderCount),
+            (ResultSortColumn.FolderCount, true) => nodes.OrderByDescending(static node => node.FolderCount),
+            (ResultSortColumn.Created, false) => nodes.OrderBy(static node => node.CreatedUtc),
+            (ResultSortColumn.Created, true) => nodes.OrderByDescending(static node => node.CreatedUtc),
+            (ResultSortColumn.Accessed, false) => nodes.OrderBy(static node => node.LastAccessUtc),
+            (ResultSortColumn.Accessed, true) => nodes.OrderByDescending(static node => node.LastAccessUtc),
+            // Folders first, then by extension, like Explorer's Type column.
+            (ResultSortColumn.Type, false) => nodes.OrderBy(static node => node.IsDirectory ? 0 : 1).ThenBy(static node => node.Extension, text).ThenBy(static node => node.Name, text),
+            (ResultSortColumn.Type, true) => nodes.OrderByDescending(static node => node.IsDirectory ? 0 : 1).ThenByDescending(static node => node.Extension, text).ThenBy(static node => node.Name, text),
+            (ResultSortColumn.Attributes, false) => nodes.OrderBy(static node => node.Attributes).ThenBy(static node => node.Name, text),
+            _ => nodes.OrderByDescending(static node => node.Attributes).ThenBy(static node => node.Name, text)
+        };
+    }
 
     private void UpdateSortIndicators()
     {
-        if (NameHeaderText is null)
+        if (SortDirectionButton is null)
         {
             return;
         }
 
-        NameHeaderText.Text = SortHeader(LocalizationService.Get("SortNameLabel"), SortColumn.Name);
-        SizeHeaderText.Text = SortHeader(LocalizationService.Get("SortSizeLabel"), SortColumn.Size);
-        AllocatedHeaderText.Text = SortHeader(LocalizationService.Get("SortAllocatedLabel"), SortColumn.Allocated);
-        ModifiedHeaderText.Text = SortHeader(LocalizationService.Get("SortModifiedLabel"), SortColumn.Modified);
+        foreach (var (key, header) in _resultHeaderTexts)
+        {
+            var column = ResultColumns.Get(key);
+            // Size and % of parent share the size sort; only the Size header shows the arrow.
+            var sorted = column.Sort == _sortColumn && !(key == ResultColumnKey.Percent && _resultHeaderTexts.ContainsKey(ResultColumnKey.Size));
+            header.Text = sorted ? $"{column.Title} {(_sortDescending ? "↓" : "↑")}" : column.Title;
+        }
         SortDirectionButton.Content = _sortDescending ? "↓" : "↑";
         ToolTipService.SetToolTip(SortDirectionButton, LocalizationService.Get(_sortDescending ? "SortDescendingTip" : "SortAscendingTip"));
     }
-
-    private string SortHeader(string label, SortColumn column) => _sortColumn == column
-        ? $"{label} {(_sortDescending ? "↓" : "↑")}"
-        : label;
 
     private void ChildrenList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -1092,6 +1144,13 @@ public sealed partial class MainPage : Page
     {
         if (ChildrenList.SelectedItem is not NodeRow row)
         {
+            return;
+        }
+
+        if (row.IsLive && row.Source.IsDirectory)
+        {
+            // The folder's contents are not in the tree yet; it opens once the scan completes.
+            StatusText.Text = LocalizationService.Get("LiveFolderNotReady");
             return;
         }
 
@@ -1166,45 +1225,33 @@ public sealed partial class MainPage : Page
 
     private void ResultColumnSplitter_DragDelta(object sender, DragDeltaEventArgs e)
     {
-        if (sender is not FrameworkElement { Tag: string column })
+        if (sender is not FrameworkElement { Tag: string tag } || !Enum.TryParse<ResultColumnKey>(tag, out var key))
         {
             return;
         }
 
-        var minimum = GetResultColumnMinimum(column);
-        var maximum = GetResultColumnMaximum(column);
-        var width = Math.Clamp(GetResultColumnActualWidth(column) + e.HorizontalChange, minimum, maximum);
-        SetResultColumnWidth(column, new GridLength(width));
+        var column = ResultColumns.Get(key);
+        var width = Math.Clamp(GetResultColumnActualWidth(key) + e.HorizontalChange, column.MinWidth, GetResultColumnMaximum(column));
+        ResultColumnWidths.Set(key, new GridLength(width));
     }
 
     private void ResultColumnSplitter_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
     {
-        if (sender is FrameworkElement { Tag: string column })
+        if (sender is FrameworkElement { Tag: string tag } && Enum.TryParse<ResultColumnKey>(tag, out var key))
         {
-            FitResultColumn(column);
+            FitResultColumn(key);
             e.Handled = true;
         }
     }
 
-    private void FitResultColumn(string column)
+    private void FitResultColumn(ResultColumnKey key)
     {
+        var column = ResultColumns.Get(key);
         var rows = ChildrenList.ItemsSource as IEnumerable<NodeRow> ?? [];
-        var values = column switch
-        {
-            "Name" => rows.SelectMany(static row => new[] { row.Name, row.CountText }),
-            "Size" => rows.Select(static row => row.SizeText),
-            "Allocated" => rows.Select(static row => row.AllocatedText),
-            "Modified" => rows.Select(static row => row.ModifiedText),
-            _ => []
-        };
-        var header = column switch
-        {
-            "Name" => NameHeaderText.Text,
-            "Size" => SizeHeaderText.Text,
-            "Allocated" => AllocatedHeaderText.Text,
-            "Modified" => ModifiedHeaderText.Text,
-            _ => string.Empty
-        };
+        var values = key == ResultColumnKey.Name
+            ? rows.SelectMany(static row => new[] { row.Name, row.CountText })
+            : rows.Select(column.Text);
+        var header = _resultHeaderTexts.TryGetValue(key, out var headerText) ? headerText.Text : column.Title;
 
         var candidates = values
             .Append(header)
@@ -1221,56 +1268,25 @@ public sealed partial class MainPage : Page
             measured = Math.Max(measured, measurer.DesiredSize.Width);
         }
 
-        var padding = column == "Name" ? 24 : 30;
-        SetResultColumnWidth(column, new GridLength(Math.Clamp(
-            measured + padding,
-            GetResultColumnMinimum(column),
-            GetResultColumnMaximum(column))));
-    }
-
-    private double GetResultColumnActualWidth(string column) => column switch
-    {
-        "Name" => NameResultColumn.ActualWidth,
-        "Size" => SizeResultColumn.ActualWidth,
-        "Allocated" => AllocatedResultColumn.ActualWidth,
-        "Modified" => ModifiedResultColumn.ActualWidth,
-        _ => 0
-    };
-
-    private static double GetResultColumnMinimum(string column) => column switch
-    {
-        "Name" => 140,
-        "Size" => 96,
-        "Allocated" => 110,
-        "Modified" => 135,
-        _ => 80
-    };
-
-    private double GetResultColumnMaximum(string column)
-    {
-        var available = Math.Max(320, ResultHeaderGrid.ActualWidth);
-        return column == "Name"
-            ? Math.Max(GetResultColumnMinimum(column), available * 0.60)
-            : Math.Max(GetResultColumnMinimum(column), Math.Min(320, available * 0.42));
-    }
-
-    private void SetResultColumnWidth(string column, GridLength width)
-    {
-        switch (column)
+        // The share column also holds a bar next to its number.
+        var padding = key switch
         {
-            case "Name":
-                ResultColumns.NameWidth = width;
-                break;
-            case "Size":
-                ResultColumns.SizeWidth = width;
-                break;
-            case "Allocated":
-                ResultColumns.AllocatedWidth = width;
-                break;
-            case "Modified":
-                ResultColumns.ModifiedWidth = width;
-                break;
-        }
+            ResultColumnKey.Name => 24,
+            ResultColumnKey.Percent => 90,
+            _ => 30
+        };
+        ResultColumnWidths.Set(key, new GridLength(Math.Clamp(measured + padding, column.MinWidth, GetResultColumnMaximum(column))));
+    }
+
+    private double GetResultColumnActualWidth(ResultColumnKey key) =>
+        _resultHeaderColumns.TryGetValue(key, out var definition) ? definition.ActualWidth : 0;
+
+    private double GetResultColumnMaximum(ResultColumnDefinition column)
+    {
+        var available = Math.Max(320, ResultHeaderHost.ActualWidth);
+        return column.Key == ResultColumnKey.Name
+            ? Math.Max(column.MinWidth, available * 0.60)
+            : Math.Max(column.MinWidth, Math.Min(320, available * 0.42));
     }
 
     private void TreemapCanvas_SizeChanged(object sender, SizeChangedEventArgs e) => RenderTreemap();
@@ -1280,7 +1296,7 @@ public sealed partial class MainPage : Page
     private void TreemapCanvas_LayoutUpdated(object? sender, object e)
     {
         if (_loaded &&
-            WorkspaceTabs.SelectedIndex == 1 &&
+            ReferenceEquals(WorkspaceTabs.SelectedItem, TreemapTab) &&
             TreemapCanvas.Children.Count == 0 &&
             TreemapCanvas.ActualWidth >= 20 &&
             TreemapCanvas.ActualHeight >= 20 &&
@@ -1292,28 +1308,33 @@ public sealed partial class MainPage : Page
 
     private async void WorkspaceTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_loaded && WorkspaceTabs.SelectedIndex is >= 0 and not 7)
+        if (_loaded && WorkspaceTabs.SelectedItem is { } selectedTab && !ReferenceEquals(selectedTab, IssuesTab))
         {
-            _lastNonIssuesTab = WorkspaceTabs.SelectedIndex;
+            _lastNonIssuesTab = selectedTab;
         }
 
-        if (_loaded && WorkspaceTabs.SelectedIndex == 1)
+        if (_loaded && ReferenceEquals(WorkspaceTabs.SelectedItem, TreemapTab))
         {
             await Task.Delay(50);
             RenderTreemap();
+        }
+        else if (_loaded && ReferenceEquals(WorkspaceTabs.SelectedItem, ChartsTab))
+        {
+            RefreshChartIfVisible();
         }
     }
 
     private void RenderTreemap()
     {
         TreemapCanvas.Children.Clear();
-        if (_currentNode is null || TreemapCanvas.ActualWidth < 20 || TreemapCanvas.ActualHeight < 20)
+        var source = _currentNode?.Children ?? _liveTopLevel;
+        if (source is null || TreemapCanvas.ActualWidth < 20 || TreemapCanvas.ActualHeight < 20)
         {
             return;
         }
 
         const bool displayAllocated = DisplayAllocatedMeasurements;
-        var nodes = _currentNode.Children
+        var nodes = source
             .Where(node => GetMeasure(node, displayAllocated) > 0)
             .OrderByDescending(node => GetMeasure(node, displayAllocated))
             .Take(250)
@@ -1365,7 +1386,7 @@ public sealed partial class MainPage : Page
 
     private void TreemapTile_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
     {
-        if (sender is Border { Tag: ScanNode node })
+        if (sender is Border { Tag: ScanNode node } && _currentNode is not null)
         {
             if (node.IsDirectory)
             {
@@ -1453,55 +1474,10 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private async void Export_Click(object sender, RoutedEventArgs e)
-    {
-        if (_scanResult is not { } result)
-        {
-            return;
-        }
-
-        var picker = new FileSavePicker
-        {
-            SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
-            SuggestedFileName = $"DiskLoom-{SanitizeFileName(result.Root.Name)}-{DateTime.Now:yyyyMMdd-HHmm}"
-        };
-        picker.FileTypeChoices.Add(LocalizationService.Get("FileCsv"), [".csv"]);
-        picker.FileTypeChoices.Add(LocalizationService.Get("FileJson"), [".json"]);
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, App.WindowHandle);
-        var file = await picker.PickSaveFileAsync();
-        if (file is null)
-        {
-            return;
-        }
-
-        try
-        {
-            SetBusy(true, LocalizationService.Get("Exporting"));
-            var path = file.Path;
-            if (file.FileType.Equals(".json", StringComparison.OrdinalIgnoreCase))
-            {
-                await Task.Run(() => _exportService.ExportJsonAsync(result, path));
-            }
-            else
-            {
-                await Task.Run(() => _exportService.ExportCsvAsync(result, path));
-            }
-            StatusText.Text = LocalizationService.Format("ExportedTo", file.Path);
-            StatusDetailText.Text = string.Empty;
-        }
-        catch (Exception exception)
-        {
-            ShowNotification(exception.Message, InfoBarSeverity.Error);
-        }
-        finally
-        {
-            SetBusy(false);
-        }
-    }
-
     private async void SaveSnapshot_Click(object sender, RoutedEventArgs e)
     {
-        if (_scanResult is not { } result)
+        // A filtered view would record every non-matching file as removed.
+        if ((_basePresentation?.Result ?? _scanResult) is not { } result)
         {
             return;
         }
@@ -1538,7 +1514,7 @@ public sealed partial class MainPage : Page
 
     private async void Compare_Click(object sender, RoutedEventArgs e)
     {
-        if (_scanResult is not { } result)
+        if ((_basePresentation?.Result ?? _scanResult) is not { } result)
         {
             return;
         }
@@ -1567,7 +1543,7 @@ public sealed partial class MainPage : Page
             });
             ChangesList.ItemsSource = changes.Select(static change => new ChangeRow(change)).ToArray();
             ChangesHeaderText.Text = LocalizationService.Format("ChangesSince", changes.Count, older.CreatedUtc.LocalDateTime, older.RootPath);
-            WorkspaceTabs.SelectedIndex = 6;
+            WorkspaceTabs.SelectedItem = ChangesTab;
             StatusText.Text = LocalizationService.Get("ComparisonComplete");
             StatusDetailText.Text = LocalizationService.Format("ChangedPaths", changes.Count);
         }
@@ -1604,6 +1580,8 @@ public sealed partial class MainPage : Page
         var canDelete = targets.Count > 0 && targets.All(CanDeleteTarget);
         FileRecycleMenuItem.IsEnabled = canDelete;
         FileDeleteMenuItem.IsEnabled = canDelete;
+        FileCopyToMenuItem.IsEnabled = canDelete;
+        FileMoveToMenuItem.IsEnabled = canDelete;
     }
 
     // Selected rows in display order (SelectedItems is in click order).
@@ -1674,6 +1652,7 @@ public sealed partial class MainPage : Page
         LargestFilesList.ItemsSource = WithoutDeleted(LargestFilesList.ItemsSource as IEnumerable<NodeRow>);
         InsightsList.ItemsSource = WithoutDeleted(InsightsList.ItemsSource as IEnumerable<InsightRow>);
         DuplicatesList.ItemsSource = WithoutDeleted(DuplicatesList.ItemsSource as IEnumerable<DuplicateRow>);
+        SearchResultsList.ItemsSource = WithoutDeleted(SearchResultsList.ItemsSource as IEnumerable<NodeRow>);
     }
 
     private T[]? WithoutDeleted<T>(IEnumerable<T>? rows) where T : IFileActionRow =>
@@ -1728,18 +1707,18 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        if (WorkspaceTabs.SelectedIndex != 7)
+        if (!ReferenceEquals(WorkspaceTabs.SelectedItem, IssuesTab))
         {
-            _lastNonIssuesTab = Math.Max(0, WorkspaceTabs.SelectedIndex);
+            _lastNonIssuesTab = WorkspaceTabs.SelectedItem;
         }
-        WorkspaceTabs.SelectedIndex = 7;
+        WorkspaceTabs.SelectedItem = IssuesTab;
         NotificationBar.IsOpen = false;
         IssuesList.Focus(FocusState.Programmatic);
     }
 
     private void IssuesBackButton_Click(object sender, RoutedEventArgs e)
     {
-        WorkspaceTabs.SelectedIndex = _lastNonIssuesTab is >= 0 and < 7 ? _lastNonIssuesTab : 0;
+        WorkspaceTabs.SelectedItem = _lastNonIssuesTab is TabViewItem tab && !ReferenceEquals(tab, IssuesTab) ? tab : OverviewTab;
     }
 
     private async void RecycleSelected_Click(object sender, RoutedEventArgs e) => await DeleteMenuTargetsAsync(permanently: false);
@@ -1958,6 +1937,12 @@ public sealed partial class MainPage : Page
         InsightsList.ItemsSource = null;
         ChangesList.ItemsSource = null;
         IssuesList.ItemsSource = null;
+        SearchResultsList.ItemsSource = null;
+        SearchSummaryText.Text = LocalizationService.Get("SearchSummaryDefault");
+        ClearLiveResults();
+        ClearChart();
+        _basePresentation = null;
+        ResetTreeFilterState();
         IssuesTab.Header = LocalizationService.Get("IssuesTabLabel");
         TreemapCanvas.Children.Clear();
         LogicalSizeText.Text = "—";
@@ -1973,6 +1958,7 @@ public sealed partial class MainPage : Page
         _navigationHistory.Clear();
         _navigationIndex = -1;
         RefreshButton.IsEnabled = false;
+        FilterButton.IsEnabled = false;
         ExportButton.IsEnabled = false;
         SaveSnapshotButton.IsEnabled = false;
         CompareButton.IsEnabled = false;
@@ -2204,13 +2190,4 @@ public sealed partial class MainPage : Page
     private sealed record AreaItem(ScanNode Node, double Area);
     private readonly record struct LayoutRect(double X, double Y, double Width, double Height);
     private sealed record TreemapTile(ScanNode Node, double X, double Y, double Width, double Height);
-
-    private enum SortColumn
-    {
-        Size = 0,
-        Allocated = 1,
-        Name = 2,
-        Modified = 3,
-        FileCount = 4
-    }
 }

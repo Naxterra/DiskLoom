@@ -22,6 +22,10 @@ public sealed class ScanNode
     public bool IsAdditionalHardLink { get; internal set; }
     public List<ScanNode> Children { get; init; } = [];
 
+    // Running totals shared by a top-level folder and all folders below it while a scan is in
+    // progress, so a live view can show sizes before aggregation. Null for the root and files.
+    internal LiveTotals? Live;
+
     [JsonIgnore]
     public string Extension => IsDirectory ? string.Empty : Path.GetExtension(Name).ToLowerInvariant();
 
@@ -66,7 +70,20 @@ public sealed record ScanProgress(
     long FilesScanned,
     long DirectoriesScanned,
     long BytesScanned,
-    TimeSpan Elapsed);
+    TimeSpan Elapsed)
+{
+    // Detached copies of the scan root's direct children with the sizes counted so far.
+    // Null until the root folder itself has been listed, and on reports without a fresh copy.
+    public IReadOnlyList<ScanNode>? TopLevel { get; init; }
+}
+
+internal sealed class LiveTotals
+{
+    public long Size;
+    public long AllocatedSize;
+    public long FileCount;
+    public long FolderCount;
+}
 
 public sealed record ScanIssue(string Path, string Message, string ErrorType);
 

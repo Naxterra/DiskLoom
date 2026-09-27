@@ -14,11 +14,12 @@ public sealed record BreadcrumbSegment(string Label, string FullPath, ScanNode? 
 
 public sealed class FolderTreeRow
 {
-    public FolderTreeRow(string fullPath, ScanNode? source)
+    public FolderTreeRow(string fullPath, ScanNode? source, long parentSize = 0)
     {
         Source = source;
         FullPath = fullPath;
         Name = source?.Name ?? FormatName(fullPath);
+        ParentSize = parentSize;
     }
 
     public FolderTreeRow(DriveSummary drive, ScanNode? source)
@@ -31,6 +32,8 @@ public sealed class FolderTreeRow
 
     public DriveSummary? Drive { get; }
     public ScanNode? Source { get; }
+    // Size of the folder above this one in the scan; 0 when it was not scanned.
+    public long ParentSize { get; }
     public string FullPath { get; }
     public string Name { get; }
     public string Glyph => Drive is null ? "\uE8B7" : "\uE7F1";
@@ -41,6 +44,21 @@ public sealed class FolderTreeRow
             : Drive is null
                 ? "—"
                 : LocalizationService.Get("NotReady");
+
+    // Drives show how full they are; scanned folders show their share of the parent folder.
+    public double Percent => Drive is { IsReady: true, TotalBytes: > 0 }
+        ? Math.Clamp(Drive.UsedPercentage, 0, 100)
+        : Source is not null && ParentSize > 0
+            ? Math.Clamp(Source.Size * 100d / ParentSize, 0, 100)
+            : 0;
+
+    public Visibility BarVisibility => Drive is { IsReady: true, TotalBytes: > 0 } || (Source is not null && ParentSize > 0)
+        ? Visibility.Visible
+        : Visibility.Collapsed;
+
+    public string PercentToolTip => LocalizationService.Format(
+        Drive is { IsReady: true, TotalBytes: > 0 } ? "DriveUsedPercent" : "PercentOfParentTip",
+        Percent.ToString("0.0", System.Globalization.CultureInfo.CurrentCulture));
 
     private static string FormatName(string path)
     {
@@ -62,6 +80,13 @@ public sealed class ResultColumnLayout : INotifyPropertyChanged
     private GridLength _sizeWidth = new(1, GridUnitType.Star);
     private GridLength _allocatedWidth = new(1, GridUnitType.Star);
     private GridLength _modifiedWidth = new(1.2, GridUnitType.Star);
+    private GridLength _percentWidth = new(1.1, GridUnitType.Star);
+    private GridLength _filesWidth = new(0.8, GridUnitType.Star);
+    private GridLength _foldersWidth = new(0.8, GridUnitType.Star);
+    private GridLength _createdWidth = new(1.2, GridUnitType.Star);
+    private GridLength _accessedWidth = new(1.2, GridUnitType.Star);
+    private GridLength _typeWidth = new(0.8, GridUnitType.Star);
+    private GridLength _attributesWidth = new(0.7, GridUnitType.Star);
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -89,6 +114,66 @@ public sealed class ResultColumnLayout : INotifyPropertyChanged
         set => Set(ref _modifiedWidth, value);
     }
 
+    public GridLength PercentWidth
+    {
+        get => _percentWidth;
+        set => Set(ref _percentWidth, value);
+    }
+
+    public GridLength FilesWidth
+    {
+        get => _filesWidth;
+        set => Set(ref _filesWidth, value);
+    }
+
+    public GridLength FoldersWidth
+    {
+        get => _foldersWidth;
+        set => Set(ref _foldersWidth, value);
+    }
+
+    public GridLength CreatedWidth
+    {
+        get => _createdWidth;
+        set => Set(ref _createdWidth, value);
+    }
+
+    public GridLength AccessedWidth
+    {
+        get => _accessedWidth;
+        set => Set(ref _accessedWidth, value);
+    }
+
+    public GridLength TypeWidth
+    {
+        get => _typeWidth;
+        set => Set(ref _typeWidth, value);
+    }
+
+    public GridLength AttributesWidth
+    {
+        get => _attributesWidth;
+        set => Set(ref _attributesWidth, value);
+    }
+
+    public void Set(ResultColumnKey key, GridLength value)
+    {
+        switch (key)
+        {
+            case ResultColumnKey.Name: NameWidth = value; break;
+            case ResultColumnKey.Size: SizeWidth = value; break;
+            case ResultColumnKey.Allocated: AllocatedWidth = value; break;
+            case ResultColumnKey.Modified: ModifiedWidth = value; break;
+            case ResultColumnKey.Percent: PercentWidth = value; break;
+            case ResultColumnKey.Files: FilesWidth = value; break;
+            case ResultColumnKey.Folders: FoldersWidth = value; break;
+            case ResultColumnKey.Created: CreatedWidth = value; break;
+            case ResultColumnKey.Accessed: AccessedWidth = value; break;
+            case ResultColumnKey.Type: TypeWidth = value; break;
+            default: AttributesWidth = value; break;
+        }
+    }
+
     private void Set(ref GridLength field, GridLength value, [CallerMemberName] string? propertyName = null)
     {
         if (field.Equals(value))
@@ -107,10 +192,21 @@ public interface IFileActionRow
     bool CanDelete { get; }
 }
 
-public sealed class NodeRow(ScanNode source, bool displayAllocated = false, ResultColumnLayout? columnLayout = null) : IFileActionRow
+// Live rows are updated in place (Update) while a scan runs, so the list keeps its items.
+public sealed class NodeRow(
+    ScanNode source,
+    bool displayAllocated = false,
+    ResultColumnLayout? columnLayout = null,
+    long parentSize = 0,
+    bool isLive = false) : IFileActionRow, INotifyPropertyChanged
 {
-    public ScanNode Source { get; } = source;
-    public bool CanDelete => true;
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    public ScanNode Source { get; private set; } = source;
+    public bool IsLive { get; } = isLive;
+    // Live rows are still growing; deleting or moving them would race the running scan.
+    public bool CanDelete => !IsLive;
+    public long ParentSize { get; private set; } = parentSize;
     public ResultColumnLayout ColumnLayout { get; } = columnLayout ?? ResultColumnLayout.Fallback;
     public string Name => Source.Name;
     public string Path => Source.FullPath;
@@ -121,8 +217,39 @@ public sealed class NodeRow(ScanNode source, bool displayAllocated = false, Resu
     public string SizeText => ByteFormatter.Format(Source.Size);
     public string AllocatedText => ByteFormatter.Format(Source.AllocatedSize);
     public string CountText => Source.IsDirectory ? LocalizationService.Format("FilesCount", Source.FileCount) : string.Empty;
-    public string ModifiedText => Source.LastWriteUtc == default ? "—" : Source.LastWriteUtc.LocalDateTime.ToString("g");
-    public string AttributesText => Source.Attributes.ToString();
+    public string ModifiedText => FormatDate(Source.LastWriteUtc);
+    public string CreatedText => FormatDate(Source.CreatedUtc);
+    public string AccessedText => FormatDate(Source.LastAccessUtc);
+    public string FileCountText => Source.IsDirectory ? Source.FileCount.ToString("N0") : string.Empty;
+    public string FolderCountText => Source.IsDirectory ? Source.FolderCount.ToString("N0") : string.Empty;
+    public double PercentOfParent => ParentSize <= 0 ? 0 : Math.Clamp(Source.Size * 100d / ParentSize, 0, 100);
+    public string PercentText => ParentSize <= 0 ? "—" : $"{PercentOfParent.ToString("0.0", System.Globalization.CultureInfo.CurrentCulture)} %";
+    public string AttributesText => FormatAttributes(Source.Attributes);
+
+    internal void Update(ScanNode source, long parentSize)
+    {
+        Source = source;
+        ParentSize = parentSize;
+        // An empty property name tells every binding on the row to refresh.
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(string.Empty));
+    }
+
+    private static string FormatDate(DateTimeOffset value) => value == default ? "—" : value.LocalDateTime.ToString("g");
+
+    // Explorer's attribute letters: Read-only, Hidden, System, Archive, Compressed, Encrypted, Offline, and L for links.
+    private static string FormatAttributes(FileAttributes attributes)
+    {
+        var letters = new System.Text.StringBuilder(8);
+        if ((attributes & FileAttributes.ReadOnly) != 0) letters.Append('R');
+        if ((attributes & FileAttributes.Hidden) != 0) letters.Append('H');
+        if ((attributes & FileAttributes.System) != 0) letters.Append('S');
+        if ((attributes & FileAttributes.Archive) != 0) letters.Append('A');
+        if ((attributes & FileAttributes.Compressed) != 0) letters.Append('C');
+        if ((attributes & FileAttributes.Encrypted) != 0) letters.Append('E');
+        if ((attributes & FileAttributes.Offline) != 0) letters.Append('O');
+        if ((attributes & FileAttributes.ReparsePoint) != 0) letters.Append('L');
+        return letters.Length == 0 ? "—" : letters.ToString();
+    }
 }
 
 public sealed class ExtensionRow(ExtensionStatistic statistic)
@@ -137,7 +264,11 @@ public sealed class ExtensionRow(ExtensionStatistic statistic)
 
 public sealed class AgeRow(AgeStatistic statistic)
 {
-    public string Label { get; } = statistic.Label switch
+    public string Label { get; } = LocalizeAge(statistic.Label);
+    public string SizeText { get; } = ByteFormatter.Format(statistic.Size);
+    public string CountText { get; } = LocalizationService.Format("FilesCount", statistic.FileCount);
+
+    internal static string LocalizeAge(string label) => label switch
     {
         "Today" => LocalizationService.Get("AgeToday"),
         "2–7 days" => LocalizationService.Get("Age2To7"),
@@ -146,8 +277,6 @@ public sealed class AgeRow(AgeStatistic statistic)
         "6–12 months" => LocalizationService.Get("Age6To12Months"),
         _ => LocalizationService.Get("AgeOlderYear")
     };
-    public string SizeText { get; } = ByteFormatter.Format(statistic.Size);
-    public string CountText { get; } = LocalizationService.Format("FilesCount", statistic.FileCount);
 }
 
 public sealed class DuplicateRow(int groupNumber, DuplicateGroup group, DuplicateFile file) : IFileActionRow
@@ -227,4 +356,43 @@ public sealed class DriveRow
     public string Detail => Drive.IsReady
         ? LocalizationService.Format("DriveFreeOf", ByteFormatter.Format(Drive.FreeBytes), ByteFormatter.Format(Drive.TotalBytes), Drive.Format)
         : LocalizationService.Get("NotReady");
+}
+
+public sealed class ChartSliceRow(string label, long size, long fileCount, double percent, Microsoft.UI.Xaml.Media.SolidColorBrush brush, ScanNode? node)
+{
+    public string Label { get; } = label;
+    public long Size { get; } = size;
+    public double Percent { get; } = percent;
+    public ScanNode? Node { get; } = node;
+    public Microsoft.UI.Xaml.Media.SolidColorBrush Brush { get; } = brush;
+    public string SizeText { get; } = ByteFormatter.Format(size);
+    public string PercentText { get; } = $"{percent.ToString("0.0", System.Globalization.CultureInfo.CurrentCulture)} %";
+    public string CountText { get; } = LocalizationService.Format("FilesCount", fileCount);
+    public string ToolTip => $"{Label}\n{SizeText} · {PercentText} · {CountText}";
+}
+
+// One entry in the column chooser; Name is always shown.
+public sealed class ColumnChoice(ResultColumnKey key, string title, bool isVisible) : INotifyPropertyChanged
+{
+    private bool _isVisible = isVisible;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    public ResultColumnKey Key { get; } = key;
+    public string Title { get; } = title;
+    public bool CanHide => Key != ResultColumnKey.Name;
+
+    public bool IsVisible
+    {
+        get => _isVisible;
+        set
+        {
+            if (_isVisible == value || (!CanHide && !value))
+            {
+                return;
+            }
+            _isVisible = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsVisible)));
+        }
+    }
 }

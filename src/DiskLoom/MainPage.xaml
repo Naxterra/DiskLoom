@@ -12,6 +12,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
@@ -26,6 +27,24 @@
                 </AppBarButton>
                 <AppBarButton x:Name="RefreshButton" x:Uid="RefreshButton" Label="Rescan" Click="Refresh_Click" IsEnabled="False">
                     <AppBarButton.Icon><FontIcon Glyph="&#xE72C;" /></AppBarButton.Icon>
+                </AppBarButton>
+                <AppBarButton x:Name="FilterButton" x:Uid="FilterButton" Label="Filter" IsEnabled="False">
+                    <AppBarButton.Icon><FontIcon Glyph="&#xE71C;" /></AppBarButton.Icon>
+                    <AppBarButton.Flyout>
+                        <Flyout x:Name="TreeFilterFlyout" Placement="Bottom">
+                            <StackPanel Width="320" Spacing="10">
+                                <TextBlock x:Uid="TreeFilterTitle" Text="Show only matching files" FontWeight="SemiBold" />
+                                <TextBlock x:Uid="TreeFilterHint" Text="Folder sizes, the tree, the treemap and charts then count only the matching files." TextWrapping="Wrap" Style="{StaticResource MutedTextStyle}" />
+                                <ComboBox x:Name="TreeFilterTypeBox" x:Uid="TreeFilterTypeBox" Header="File type" HorizontalAlignment="Stretch" />
+                                <TextBox x:Name="TreeFilterPatternBox" x:Uid="TreeFilterPatternBox" Header="Name pattern" PlaceholderText="*.mp4; *.mkv; backup*" KeyDown="TreeFilterPatternBox_KeyDown" />
+                                <ComboBox x:Name="TreeFilterAgeBox" x:Uid="TreeFilterAgeBox" Header="Last modified" HorizontalAlignment="Stretch" />
+                                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                                    <Button x:Uid="TreeFilterClearButton" Content="Clear" Click="TreeFilterClear_Click" />
+                                    <Button x:Uid="TreeFilterApplyButton" Content="Apply" Style="{StaticResource AccentButtonStyle}" Click="TreeFilterApply_Click" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Flyout>
+                    </AppBarButton.Flyout>
                 </AppBarButton>
                 <AppBarSeparator />
                 <AppBarButton x:Name="ExportButton" x:Uid="ExportButton" Label="Export" Click="Export_Click" IsEnabled="False">
@@ -44,6 +63,7 @@
                 <CommandBar.SecondaryCommands>
                     <AppBarButton x:Uid="SettingsMenu" Label="Settings" Click="Settings_Click" />
                     <AppBarButton x:Uid="CopyCurrentPathMenu" Label="Copy current path" Click="CopyPath_Click" />
+                    <AppBarButton x:Uid="CustomizeColumnsMenu" Label="Customize columns…" Click="CustomizeColumns_Click" />
                     <AppBarButton x:Uid="AboutMenu" Label="About DiskLoom" Click="About_Click" />
                 </CommandBar.SecondaryCommands>
             </CommandBar>
@@ -105,7 +125,20 @@
             </Grid>
         </Border>
 
-        <Grid x:Name="WorkspaceGrid" Grid.Row="2">
+        <Border x:Name="FilterBanner" Grid.Row="2" Padding="12,5" Visibility="Collapsed" Background="{ThemeResource DiskLoomFilesCardBrush}" BorderBrush="{ThemeResource DiskLoomVioletBrush}" BorderThickness="0,0,0,1">
+            <Grid ColumnSpacing="10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <FontIcon Glyph="&#xE71C;" FontSize="14" Foreground="{ThemeResource DiskLoomVioletBrush}" VerticalAlignment="Center" />
+                <TextBlock x:Name="FilterBannerText" Grid.Column="1" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                <Button x:Uid="ClearFilterButton" Grid.Column="2" Content="Clear filter" Click="TreeFilterClear_Click" />
+            </Grid>
+        </Border>
+
+        <Grid x:Name="WorkspaceGrid" Grid.Row="3">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition x:Name="TreePaneColumn" Width="420" MinWidth="240" MaxWidth="640" />
                 <ColumnDefinition Width="12" />
@@ -131,6 +164,9 @@
                             <MenuFlyoutItem x:Uid="TreeShowInExplorerMenu" Text="Show in File Explorer" Click="TreeShowInExplorer_Click" />
                             <MenuFlyoutItem x:Uid="TreeCopyPathMenu" Text="Copy path" Click="TreeCopyPath_Click" />
                             <MenuFlyoutSeparator />
+                            <MenuFlyoutItem x:Name="TreeCopyToMenuItem" x:Uid="CopyToMenu" Text="Copy to…" Click="TreeCopyTo_Click" />
+                            <MenuFlyoutItem x:Name="TreeMoveToMenuItem" x:Uid="MoveToMenu" Text="Move to…" Click="TreeMoveTo_Click" />
+                            <MenuFlyoutSeparator />
                             <MenuFlyoutItem x:Name="TreeRecycleMenuItem" x:Uid="TreeRecycleMenu" Text="Move folder to Recycle Bin" Click="TreeRecycle_Click" />
                             <MenuFlyoutItem x:Name="TreeDeleteMenuItem" x:Uid="TreeDeletePermanentlyMenu" Text="Delete folder permanently…" Click="TreeDeletePermanently_Click" />
                         </MenuFlyout>
@@ -142,10 +178,12 @@
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <FontIcon Glyph="{Binding Content.Glyph}" FontSize="14" Foreground="{ThemeResource DiskLoomCyanBrush}" VerticalAlignment="Center" />
                                 <TextBlock Grid.Column="1" Text="{Binding Content.Name}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
-                                <TextBlock Grid.Column="2" Text="{Binding Content.PrimarySizeText}" FontSize="11" Style="{StaticResource MutedTextStyle}" VerticalAlignment="Center" />
+                                <ProgressBar Grid.Column="2" Width="44" Maximum="100" Value="{Binding Content.Percent}" Visibility="{Binding Content.BarVisibility}" ToolTipService.ToolTip="{Binding Content.PercentToolTip}" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="3" MinWidth="58" Text="{Binding Content.PrimarySizeText}" FontSize="11" TextAlignment="Right" Style="{StaticResource MutedTextStyle}" VerticalAlignment="Center" />
                             </Grid>
                         </DataTemplate>
                     </TreeView.ItemTemplate>
@@ -165,8 +203,8 @@
                 </Thumb.Template>
             </Thumb>
 
-            <TabView x:Name="WorkspaceTabs" Grid.Column="2" IsAddTabButtonVisible="False" Margin="2,2,6,6" SelectionChanged="WorkspaceTabs_SelectionChanged">
-                <TabViewItem x:Uid="OverviewTab" Header="Overview" IsClosable="False">
+            <TabView x:Name="WorkspaceTabs" Grid.Column="2" VerticalAlignment="Stretch" HorizontalAlignment="Stretch" IsAddTabButtonVisible="False" Margin="2,2,6,6" SelectionChanged="WorkspaceTabs_SelectionChanged">
+                <TabViewItem x:Name="OverviewTab" x:Uid="OverviewTab" Header="Overview" IsClosable="False">
                     <Grid Padding="6">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
@@ -223,39 +261,17 @@
                                 <ComboBoxItem x:Uid="SortName" Content="Name" />
                                 <ComboBoxItem x:Uid="SortModified" Content="Modified" />
                                 <ComboBoxItem x:Uid="SortFileCount" Content="File count" />
+                                <ComboBoxItem x:Uid="SortFolderCount" Content="Folder count" />
+                                <ComboBoxItem x:Uid="SortCreated" Content="Created" />
+                                <ComboBoxItem x:Uid="SortAccessed" Content="Last accessed" />
+                                <ComboBoxItem x:Uid="SortType" Content="Type" />
+                                <ComboBoxItem x:Uid="SortAttributes" Content="Attributes" />
                             </ComboBox>
                             <Button x:Name="SortDirectionButton" Grid.Column="2" Width="36" Height="32" Content="↓" FontSize="18" VerticalAlignment="Bottom" Margin="0,0,0,1" ToolTipService.ToolTip="Descending; click to reverse" Click="SortDirectionButton_Click" />
                         </Grid>
 
-                        <Grid x:Name="ResultHeaderGrid" Grid.Row="2" Padding="6,2" Background="{ThemeResource DiskLoomResultHeaderBrush}">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="28" />
-                                <ColumnDefinition x:Name="NameResultColumn" Width="{x:Bind ResultColumns.NameWidth, Mode=OneWay}" MinWidth="140" />
-                                <ColumnDefinition Width="6" />
-                                <ColumnDefinition x:Name="SizeResultColumn" Width="{x:Bind ResultColumns.SizeWidth, Mode=OneWay}" MinWidth="96" />
-                                <ColumnDefinition Width="6" />
-                                <ColumnDefinition x:Name="AllocatedResultColumn" Width="{x:Bind ResultColumns.AllocatedWidth, Mode=OneWay}" MinWidth="110" />
-                                <ColumnDefinition Width="6" />
-                                <ColumnDefinition x:Name="ModifiedResultColumn" Width="{x:Bind ResultColumns.ModifiedWidth, Mode=OneWay}" MinWidth="135" />
-                                <ColumnDefinition Width="6" />
-                            </Grid.ColumnDefinitions>
-                            <Button Grid.Column="1" Tag="Name" Margin="0,0,6,0" Style="{StaticResource ColumnHeaderButtonStyle}" HorizontalContentAlignment="Left" Click="SortHeader_Click">
-                                <TextBlock x:Name="NameHeaderText" x:Uid="NameHeaderText" Text="Name" />
-                            </Button>
-                            <Thumb x:Name="NameColumnSplitter" Grid.Column="2" Tag="Name" Style="{StaticResource ResultColumnSplitterStyle}" DragDelta="ResultColumnSplitter_DragDelta" DoubleTapped="ResultColumnSplitter_DoubleTapped" />
-                            <Button Grid.Column="3" Tag="Size" Margin="6,0" Style="{StaticResource ColumnHeaderButtonStyle}" HorizontalContentAlignment="Right" Click="SortHeader_Click">
-                                <TextBlock x:Name="SizeHeaderText" x:Uid="SizeHeaderText" Text="Size ↓" />
-                            </Button>
-                            <Thumb x:Name="SizeColumnSplitter" Grid.Column="4" Tag="Size" Style="{StaticResource ResultColumnSplitterStyle}" DragDelta="ResultColumnSplitter_DragDelta" DoubleTapped="ResultColumnSplitter_DoubleTapped" />
-                            <Button Grid.Column="5" Tag="Allocated" Margin="6,0" Style="{StaticResource ColumnHeaderButtonStyle}" HorizontalContentAlignment="Right" Click="SortHeader_Click">
-                                <TextBlock x:Name="AllocatedHeaderText" x:Uid="AllocatedHeaderText" Text="On disk" />
-                            </Button>
-                            <Thumb x:Name="AllocatedColumnSplitter" Grid.Column="6" Tag="Allocated" Style="{StaticResource ResultColumnSplitterStyle}" DragDelta="ResultColumnSplitter_DragDelta" DoubleTapped="ResultColumnSplitter_DoubleTapped" />
-                            <Button Grid.Column="7" Tag="Modified" Margin="6,0" Style="{StaticResource ColumnHeaderButtonStyle}" HorizontalContentAlignment="Right" Click="SortHeader_Click">
-                                <TextBlock x:Name="ModifiedHeaderText" x:Uid="ModifiedHeaderText" Text="Modified" />
-                            </Button>
-                            <Thumb x:Name="ModifiedColumnSplitter" Grid.Column="8" Tag="Modified" Style="{StaticResource ResultColumnSplitterStyle}" DragDelta="ResultColumnSplitter_DragDelta" DoubleTapped="ResultColumnSplitter_DoubleTapped" />
-                        </Grid>
+                        <!-- Header and row template are generated in code from the chosen columns. -->
+                        <Border x:Name="ResultHeaderHost" Grid.Row="2" />
 
                         <ListView x:Name="ChildrenList" Grid.Row="3" SelectionMode="Extended" DoubleTapped="ChildrenList_DoubleTapped" SelectionChanged="ChildrenList_SelectionChanged">
                             <ListView.ItemContainerStyle>
@@ -272,46 +288,20 @@
                                     <MenuFlyoutItem x:Uid="CopyPathMenu" Text="Copy path" Click="CopySelectedPath_Click" />
                                     <MenuFlyoutItem x:Name="FilePropertiesMenuItem" x:Uid="PropertiesMenu" Text="Properties" Click="ShowProperties_Click" />
                                     <MenuFlyoutSeparator />
+                                    <MenuFlyoutItem x:Name="FileCopyToMenuItem" x:Uid="CopyToMenu" Text="Copy to…" Click="CopyTo_Click" />
+                                    <MenuFlyoutItem x:Name="FileMoveToMenuItem" x:Uid="MoveToMenu" Text="Move to…" Click="MoveTo_Click" />
+                                    <MenuFlyoutSeparator />
                                     <MenuFlyoutItem x:Uid="SelectAllMenu" Text="Select all" Click="SelectAll_Click" />
                                     <MenuFlyoutSeparator />
                                     <MenuFlyoutItem x:Name="FileRecycleMenuItem" x:Uid="RecycleMenu" Text="Move to Recycle Bin" Click="RecycleSelected_Click" />
                                     <MenuFlyoutItem x:Name="FileDeleteMenuItem" x:Uid="DeletePermanentlyMenu" Text="Delete permanently…" Click="DeleteSelected_Click" />
                                 </MenuFlyout>
                             </ListView.ContextFlyout>
-                            <ListView.ItemTemplate>
-                                <DataTemplate>
-                                    <Grid Padding="6,3">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="28" />
-                                            <ColumnDefinition Width="{Binding ColumnLayout.NameWidth}" MinWidth="140" />
-                                            <ColumnDefinition Width="6" />
-                                            <ColumnDefinition Width="{Binding ColumnLayout.SizeWidth}" MinWidth="96" />
-                                            <ColumnDefinition Width="6" />
-                                            <ColumnDefinition Width="{Binding ColumnLayout.AllocatedWidth}" MinWidth="110" />
-                                            <ColumnDefinition Width="6" />
-                                            <ColumnDefinition Width="{Binding ColumnLayout.ModifiedWidth}" MinWidth="135" />
-                                            <ColumnDefinition Width="6" />
-                                        </Grid.ColumnDefinitions>
-                                        <FontIcon Glyph="{Binding Glyph}" FontSize="15" Foreground="{ThemeResource DiskLoomBlueBrush}" VerticalAlignment="Center" />
-                                        <StackPanel Grid.Column="1" Margin="0,0,6,0" VerticalAlignment="Center">
-                                            <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
-                                            <TextBlock Text="{Binding CountText}" FontSize="10" Style="{StaticResource MutedTextStyle}" />
-                                        </StackPanel>
-                                        <Border Grid.Column="2" Width="1" HorizontalAlignment="Center" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
-                                        <TextBlock Grid.Column="3" Margin="6,0" Text="{Binding SizeText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
-                                        <Border Grid.Column="4" Width="1" HorizontalAlignment="Center" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
-                                        <TextBlock Grid.Column="5" Margin="6,0" Text="{Binding AllocatedText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
-                                        <Border Grid.Column="6" Width="1" HorizontalAlignment="Center" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
-                                        <TextBlock Grid.Column="7" Margin="6,0" Text="{Binding ModifiedText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
-                                        <Border Grid.Column="8" Width="1" HorizontalAlignment="Center" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
-                                    </Grid>
-                                </DataTemplate>
-                            </ListView.ItemTemplate>
                         </ListView>
                     </Grid>
                 </TabViewItem>
 
-                <TabViewItem x:Uid="TreemapTab" Header="Treemap" IsClosable="False">
+                <TabViewItem x:Name="TreemapTab" x:Uid="TreemapTab" Header="Treemap" IsClosable="False">
                     <Grid Padding="8">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
@@ -319,6 +309,58 @@
                         </Grid.RowDefinitions>
                         <TextBlock x:Uid="TreemapHint" Text="Double-click a folder tile to drill in. The 250 largest visible items are drawn." Style="{StaticResource MutedTextStyle}" Margin="4,2,4,8" />
                         <Canvas x:Name="TreemapCanvas" Grid.Row="1" MinWidth="600" MinHeight="420" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" Loaded="TreemapCanvas_Loaded" LayoutUpdated="TreemapCanvas_LayoutUpdated" SizeChanged="TreemapCanvas_SizeChanged" />
+                    </Grid>
+                </TabViewItem>
+
+                <TabViewItem x:Name="ChartsTab" x:Uid="ChartsTab" Header="Charts" IsClosable="False">
+                    <Grid Padding="8" RowSpacing="8">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <Grid ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="220" />
+                                <ColumnDefinition Width="150" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <ComboBox x:Name="ChartKindBox" x:Uid="ChartKindBox" Header="Break down by" HorizontalAlignment="Stretch" SelectionChanged="ChartOptions_SelectionChanged">
+                                <ComboBoxItem x:Uid="ChartKindChildren" Content="Subfolders and files" IsSelected="True" />
+                                <ComboBoxItem x:Uid="ChartKindExtensions" Content="File extensions" />
+                                <ComboBoxItem x:Uid="ChartKindCategories" Content="File types" />
+                                <ComboBoxItem x:Uid="ChartKindAges" Content="Age by last change" />
+                            </ComboBox>
+                            <ComboBox x:Name="ChartStyleBox" x:Uid="ChartStyleBox" Grid.Column="1" Header="Chart" HorizontalAlignment="Stretch" SelectionChanged="ChartOptions_SelectionChanged">
+                                <ComboBoxItem x:Uid="ChartStylePie" Content="Pie" IsSelected="True" />
+                                <ComboBoxItem x:Uid="ChartStyleBars" Content="Bars" />
+                            </ComboBox>
+                            <TextBlock x:Name="ChartTitleText" Grid.Column="2" VerticalAlignment="Bottom" Margin="4,0,0,8" TextTrimming="CharacterEllipsis" Style="{StaticResource MutedTextStyle}" />
+                        </Grid>
+                        <Grid Grid.Row="1" ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="340" />
+                            </Grid.ColumnDefinitions>
+                            <Canvas x:Name="ChartCanvas" MinWidth="280" MinHeight="280" Background="Transparent" SizeChanged="ChartCanvas_SizeChanged" />
+                            <ListView x:Name="ChartLegendList" Grid.Column="1" SelectionMode="None" IsItemClickEnabled="True" ItemClick="ChartLegendList_ItemClick">
+                                <ListView.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Padding="4,5" ColumnSpacing="8" ToolTipService.ToolTip="{Binding ToolTip}">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="14" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="54" />
+                                            </Grid.ColumnDefinitions>
+                                            <Border Width="12" Height="12" CornerRadius="3" Background="{Binding Brush}" VerticalAlignment="Center" />
+                                            <TextBlock Grid.Column="1" Text="{Binding Label}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                            <TextBlock Grid.Column="2" Text="{Binding SizeText}" VerticalAlignment="Center" />
+                                            <TextBlock Grid.Column="3" Text="{Binding PercentText}" TextAlignment="Right" Style="{StaticResource MutedTextStyle}" VerticalAlignment="Center" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
+                        </Grid>
                     </Grid>
                 </TabViewItem>
 
@@ -344,6 +386,73 @@
                                         </StackPanel>
                                         <TextBlock Grid.Column="1" Text="{Binding SizeText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
                                         <TextBlock Grid.Column="2" Text="{Binding ModifiedText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                    </Grid>
+                </TabViewItem>
+
+                <TabViewItem x:Name="SearchTab" x:Uid="SearchTab" Header="Search" IsClosable="False">
+                    <Grid Padding="8" RowSpacing="8">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="170" />
+                                <ColumnDefinition Width="170" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="SearchNameBox" x:Uid="SearchNameBox" Header="Name" PlaceholderText="*.iso; backup*; invoice" KeyDown="SearchNameBox_KeyDown" />
+                            <ComboBox x:Name="SearchTypeBox" x:Uid="SearchTypeBox" Grid.Column="1" Header="File type" HorizontalAlignment="Stretch" />
+                            <ComboBox x:Name="SearchKindBox" x:Uid="SearchKindBox" Grid.Column="2" Header="Look for" HorizontalAlignment="Stretch">
+                                <ComboBoxItem x:Uid="SearchKindFiles" Content="Files" IsSelected="True" />
+                                <ComboBoxItem x:Uid="SearchKindFolders" Content="Folders" />
+                                <ComboBoxItem x:Uid="SearchKindBoth" Content="Files and folders" />
+                            </ComboBox>
+                        </Grid>
+                        <Grid Grid.Row="1" ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="130" />
+                                <ColumnDefinition Width="130" />
+                                <ColumnDefinition Width="160" />
+                                <ColumnDefinition Width="160" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <NumberBox x:Name="SearchMinSizeBox" x:Uid="SearchMinSizeBox" Header="Min. size (MB)" Minimum="0" SpinButtonPlacementMode="Compact" />
+                            <NumberBox x:Name="SearchMaxSizeBox" x:Uid="SearchMaxSizeBox" Grid.Column="1" Header="Max. size (MB)" Minimum="0" SpinButtonPlacementMode="Compact" />
+                            <CalendarDatePicker x:Name="SearchAfterPicker" x:Uid="SearchAfterPicker" Grid.Column="2" Header="Modified after" HorizontalAlignment="Stretch" />
+                            <CalendarDatePicker x:Name="SearchBeforePicker" x:Uid="SearchBeforePicker" Grid.Column="3" Header="Modified before" HorizontalAlignment="Stretch" />
+                            <CheckBox x:Name="SearchCurrentFolderBox" x:Uid="SearchCurrentFolderBox" Grid.Column="4" Content="Only in the current folder" VerticalAlignment="Bottom" Margin="8,0,0,0" />
+                            <Button x:Uid="SearchClearButton" Grid.Column="5" Content="Reset" VerticalAlignment="Bottom" Click="SearchClear_Click" />
+                            <Button x:Uid="SearchButton" Grid.Column="6" Content="Search" VerticalAlignment="Bottom" Style="{StaticResource AccentButtonStyle}" Click="Search_Click" />
+                        </Grid>
+                        <TextBlock x:Name="SearchSummaryText" x:Uid="SearchSummaryText" Grid.Row="2" Margin="4,0" Text="Search the whole scan by name, type, size and date." Style="{StaticResource MutedTextStyle}" />
+                        <ListView x:Name="SearchResultsList" Grid.Row="3" SelectionMode="Extended" DoubleTapped="SearchResultsList_DoubleTapped">
+                            <ListView.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Padding="8,6" ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="24" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="80" />
+                                            <ColumnDefinition Width="110" />
+                                            <ColumnDefinition Width="150" />
+                                        </Grid.ColumnDefinitions>
+                                        <FontIcon Glyph="{Binding Glyph}" FontSize="15" Foreground="{ThemeResource DiskLoomBlueBrush}" VerticalAlignment="Center" />
+                                        <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{Binding Path}" FontSize="11" Style="{StaticResource MutedTextStyle}" TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="2" Text="{Binding Kind}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="3" Text="{Binding SizeText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="4" Text="{Binding ModifiedText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
                                     </Grid>
                                 </DataTemplate>
                             </ListView.ItemTemplate>
@@ -485,7 +594,7 @@
                     </Grid>
                 </TabViewItem>
 
-                <TabViewItem x:Uid="ChangesTab" Header="Changes" IsClosable="False">
+                <TabViewItem x:Name="ChangesTab" x:Uid="ChangesTab" Header="Changes" IsClosable="False">
                     <Grid Padding="8">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
@@ -564,7 +673,7 @@
             </TabView>
         </Grid>
 
-        <Grid Grid.Row="3" Padding="12,6" Background="{ThemeResource DiskLoomStatusBrush}">
+        <Grid Grid.Row="4" Padding="12,6" Background="{ThemeResource DiskLoomStatusBrush}">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="240" />
@@ -575,7 +684,7 @@
             <TextBlock x:Name="StatusDetailText" Grid.Column="2" Style="{StaticResource MutedTextStyle}" VerticalAlignment="Center" />
         </Grid>
 
-        <InfoBar x:Name="NotificationBar" Grid.Row="2" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="16" MaxWidth="620" IsOpen="False" IsClosable="True">
+        <InfoBar x:Name="NotificationBar" Grid.Row="3" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="16" MaxWidth="620" IsOpen="False" IsClosable="True">
             <InfoBar.ActionButton>
                 <Button x:Name="NotificationActionButton" x:Uid="NotificationActionButton" Content="View issues" Visibility="Collapsed" Click="NotificationActionButton_Click" />
             </InfoBar.ActionButton>

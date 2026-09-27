@@ -6,14 +6,23 @@ namespace DiskLoom.Core.Services;
 
 public sealed class ExportService
 {
-    public async Task ExportCsvAsync(ScanResult result, string destinationPath, CancellationToken cancellationToken = default)
+    public Task ExportCsvAsync(ScanResult result, string destinationPath, CancellationToken cancellationToken = default) =>
+        ExportCsvAsync(result, destinationPath, new ExportOptions(), cancellationToken);
+
+    public async Task<ExportSummary> ExportCsvAsync(ScanResult result, string destinationPath, ExportOptions options, CancellationToken cancellationToken = default)
     {
         await using var stream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024, true);
         await using var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
         await writer.WriteLineAsync("Path,Kind,Size,AllocatedSize,Files,Folders,CreatedUtc,ModifiedUtc,AccessedUtc,Attributes,VolumeSerial,FileId,HardLinkCount,AdditionalHardLink").ConfigureAwait(false);
-        foreach (var node in result.Root.DescendantsAndSelf())
+        var written = 0L;
+        foreach (var row in ReportExportService.EnumerateRows(result.Root, options))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (written >= options.MaximumRows)
+            {
+                return new ExportSummary(written, IsTruncated: true);
+            }
+            var node = row.Node;
             var fields = new[]
             {
                 node.FullPath,
@@ -32,7 +41,9 @@ public sealed class ExportService
                 node.IsAdditionalHardLink.ToString()
             };
             await writer.WriteLineAsync(string.Join(',', fields.Select(Escape))).ConfigureAwait(false);
+            written++;
         }
+        return new ExportSummary(written, IsTruncated: false);
     }
 
     public async Task ExportJsonAsync(ScanResult result, string destinationPath, CancellationToken cancellationToken = default)
