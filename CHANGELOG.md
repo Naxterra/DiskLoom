@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.22 — 2026-09-27
+
+- "Download and install" now updates DiskLoom in place instead of only opening the GitHub release page. Without a pinned signing certificate an update installs only if it is an MSI from this repository's own GitHub release, its SHA-256 matches the digest GitHub recorded for the upload, and the package is DiskLoom's (same upgrade code) with the offered version. DiskLoom restarts by itself once Windows Installer has finished.
+- Updates now use the installer in the app's language (the German UI gets the German MSI); previously either MSI could be picked.
+- Fixed a failed hash check reporting a file-in-use error and leaving the partial download behind.
+- Update failures after choosing "Download and install" are now shown even when the offer came from the automatic startup check.
+
 ## 0.1.21 — 2026-09-27
 
 - Added live results while scanning: the top-level folders and their growing sizes, file counts and treemap appear within a second instead of after the whole drive is done. Scan speed is unchanged (C:\, 600,000 files: 7.0 s with and without live results).

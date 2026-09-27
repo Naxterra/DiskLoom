@@ -1795,6 +1795,8 @@ public sealed partial class MainPage : Page
 
     private async Task CheckForUpdatesAsync(bool interactive)
     {
+        // Once the user chose to install, failures must be shown even for the silent startup check.
+        var installRequested = false;
         try
         {
             var configurationPath = Path.Combine(AppContext.BaseDirectory, "update-config.json");
@@ -1805,7 +1807,7 @@ public sealed partial class MainPage : Page
             }
 
             var currentVersion = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(0, 1, 0);
-            var result = await _updateService.CheckAsync(configuration, currentVersion);
+            var result = await _updateService.CheckAsync(configuration, currentVersion, preferredLanguage: App.CurrentLanguage);
             RecordUpdateCheck();
             if (!result.IsConfigured)
             {
@@ -1829,8 +1831,7 @@ public sealed partial class MainPage : Page
             }
 
             var availableVersion = result.Manifest.Version;
-            var canInstallDirectly = result.Manifest.HasVerifiableInstaller &&
-                                     !string.IsNullOrWhiteSpace(configuration.PublisherCertificateSha256);
+            var canInstallDirectly = UpdateService.CanInstallDirectly(result.Manifest, configuration);
             var prompt = CreateDialog(
                 LocalizationService.Format("UpdateAvailable", availableVersion),
                 string.IsNullOrWhiteSpace(result.Manifest.ReleaseNotes)
@@ -1853,16 +1854,17 @@ public sealed partial class MainPage : Page
                 return;
             }
 
+            installRequested = true;
             SetBusy(true, LocalizationService.Get("DownloadingUpdate"), indeterminate: false);
             var progress = new Progress<double>(value => WorkProgress.Value = value * 100);
             var installer = await _updateService.DownloadAndVerifyAsync(result.Manifest, configuration, progress);
             StatusText.Text = LocalizationService.Get("StartingInstaller");
-            _updateService.StartInstaller(installer);
+            _updateService.StartInstaller(installer, relaunchPath: Environment.ProcessPath);
             App.Window.Close();
         }
         catch (Exception exception)
         {
-            if (interactive)
+            if (interactive || installRequested)
             {
                 ShowNotification(LocalizationService.Format("UpdateFailed", exception.Message), InfoBarSeverity.Error);
             }
