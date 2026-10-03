@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.23 — 2026-10-03
+
+- "Copy to…" and "Move to…" hand the job to Nax-Copy when it is installed and its Explorer takeover is switched on, so they run like a paste in Explorer, in Nax-Copy's window. Without Nax-Copy (or if it doesn't answer) Windows' copy engine runs as before. After a move, DiskLoom updates its lists once the moved items are gone from their old place.
+
 ## 0.1.22 — 2026-09-27
 
 - "Download and install" now updates DiskLoom in place instead of only opening the GitHub release page. Without a pinned signing certificate an update installs only if it is an MSI from this repository's own GitHub release, its SHA-256 matches the digest GitHub recorded for the upload, and the package is DiskLoom's (same upgrade code) with the offered version. DiskLoom restarts by itself once Windows Installer has finished.
