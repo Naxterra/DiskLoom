@@ -764,7 +764,7 @@ public sealed partial class MainPage
             return;
         }
 
-        if (await TransferAsync(rows.Select(static row => row.Path).ToArray(), move) is { } moved && moved.Count > 0)
+        await TransferAsync(rows.Select(static row => row.Path).ToArray(), move, moved =>
         {
             foreach (var path in moved)
             {
@@ -772,7 +772,8 @@ public sealed partial class MainPage
             }
             _scanCache.Clear();
             RefreshListsAfterDeletion();
-        }
+            return Task.CompletedTask;
+        });
     }
 
     private async void TreeCopyTo_Click(object sender, RoutedEventArgs e)
@@ -791,16 +792,17 @@ public sealed partial class MainPage
             return;
         }
 
-        if (await TransferAsync(new[] { row.FullPath }, move: true) is { Count: > 0 })
+        await TransferAsync(new[] { row.FullPath }, move: true, async _ =>
         {
             // Like deleting a folder from the tree: rescan so totals and the tree are correct.
             _scanCache.Clear();
             await RefreshAfterTreeDeletionAsync();
-        }
+        });
     }
 
-    // Returns the sources that no longer exist afterwards (moved away), or null if nothing ran.
-    private async Task<IReadOnlyList<string>?> TransferAsync(IReadOnlyList<string> sources, bool move)
+    // afterMove gets the sources that no longer exist (moved away). With Explorer's engine that is right after the
+    // operation; with Nax-Copy, which runs the job in its own window, once the moved items are gone.
+    private async Task TransferAsync(IReadOnlyList<string> sources, bool move, Func<IReadOnlyList<string>, Task>? afterMove = null)
     {
         var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.ComputerFolder };
         picker.FileTypeFilter.Add("*");
@@ -808,19 +810,32 @@ public sealed partial class MainPage
         var folder = await picker.PickSingleFolderAsync();
         if (folder is null)
         {
-            return null;
+            return;
         }
 
         var destination = folder.Path;
         if (sources.Any(source => IsSameOrInside(destination, source)))
         {
             ShowNotification(LocalizationService.Get("TransferIntoItself"), InfoBarSeverity.Warning);
-            return null;
+            return;
         }
         if (move && sources.All(source => PathsEqual(System.IO.Path.GetDirectoryName(source), destination)))
         {
             ShowNotification(LocalizationService.Get("TransferSameFolder"), InfoBarSeverity.Informational);
-            return null;
+            return;
+        }
+
+        var scanRoot = (_basePresentation?.Result ?? _scanResult)?.Root.FullPath;
+        var landsInScan = scanRoot is not null && IsSameOrInside(destination, scanRoot);
+        if (await NaxCopyHandoff.TrySendAsync(move ? NaxCopyOperation.Move : NaxCopyOperation.Copy, destination, sources))
+        {
+            var handedOver = LocalizationService.Format(move ? "MoveHandedToNaxCopy" : "CopyHandedToNaxCopy", sources.Count, destination);
+            ShowNotification(landsInScan ? $"{handedOver} {LocalizationService.Get("RescanToSeeTransfer")}" : handedOver, InfoBarSeverity.Informational);
+            if (move && afterMove is not null)
+            {
+                _ = ApplyWhenMovedAsync(sources, afterMove);
+            }
+            return;
         }
 
         SetBusy(true, LocalizationService.Format(move ? "MovingItems" : "CopyingItems", sources.Count, destination));
@@ -833,8 +848,6 @@ public sealed partial class MainPage
                 ? sources.Where(static source => !File.Exists(source) && !Directory.Exists(source)).ToArray()
                 : [];
 
-            var scanRoot = (_basePresentation?.Result ?? _scanResult)?.Root.FullPath;
-            var landsInScan = scanRoot is not null && IsSameOrInside(destination, scanRoot);
             if (result.Succeeded)
             {
                 var message = LocalizationService.Format(move ? "MovedItems" : "CopiedItems", sources.Count, destination);
@@ -849,16 +862,39 @@ public sealed partial class MainPage
                 ShowNotification(LocalizationService.Format("TransferFailed", result.ErrorCode), InfoBarSeverity.Error);
             }
             StatusText.Text = LocalizationService.Get("TransferFinished");
-            return gone;
+            if (gone.Length > 0 && afterMove is not null)
+            {
+                await afterMove(gone);
+            }
         }
         catch (Exception exception)
         {
             ShowNotification(exception.Message, InfoBarSeverity.Error);
-            return null;
         }
         finally
         {
             SetBusy(false);
+        }
+    }
+
+    // Nax-Copy moves in the background: once every moved item is gone from its old place (checked every second, for up
+    // to six hours), update the view as after a move with Explorer's engine — unless another scan has replaced this one.
+    private async Task ApplyWhenMovedAsync(IReadOnlyList<string> sources, Func<IReadOnlyList<string>, Task> afterMove)
+    {
+        var scan = _scanResult;
+        var deadline = DateTime.UtcNow.AddHours(6);
+        while (DateTime.UtcNow < deadline && sources.Any(static source => File.Exists(source) || Directory.Exists(source)))
+        {
+            await Task.Delay(TimeSpan.FromSeconds(1));
+            if (!ReferenceEquals(scan, _scanResult))
+            {
+                return;
+            }
+        }
+        var gone = sources.Where(static source => !File.Exists(source) && !Directory.Exists(source)).ToArray();
+        if (gone.Length > 0 && ReferenceEquals(scan, _scanResult))
+        {
+            await afterMove(gone);
         }
     }
 
