@@ -300,6 +300,14 @@ public static class ScanTreeFilter
             return matcher.Matches(file.Name);
         }
 
+        // Shared (hard-linked) data is counted on the first matching path, so a filter that keeps
+        // only a link the full scan counted as zero still shows the space the data uses.
+        var sharedOwners = source.Root.Files()
+            .Where(file => file.SharesStorage && Matches(file))
+            .GroupBy(static file => (file.VolumeSerialNumber, file.FileId))
+            .Select(static group => group.MinBy(static file => file.FullPath, StringComparer.OrdinalIgnoreCase)!)
+            .ToHashSet(ReferenceEqualityComparer.Instance);
+
         var rootClone = CloneDirectory(source.Root);
         var stack = new Stack<Frame>();
         stack.Push(new Frame(source.Root, rootClone));
@@ -320,9 +328,16 @@ public static class ScanTreeFilter
                 }
                 else if (Matches(child))
                 {
-                    frame.Clone.Children.Add(CloneFile(child));
-                    frame.Clone.Size += child.Size;
-                    frame.Clone.AllocatedSize += child.AllocatedSize;
+                    var clone = CloneFile(child);
+                    if (child.SharesStorage)
+                    {
+                        var isOwner = sharedOwners.Contains(child);
+                        clone.AllocatedSize = isOwner ? child.PhysicalAllocatedSize : 0;
+                        clone.IsAdditionalHardLink = !isOwner;
+                    }
+                    frame.Clone.Children.Add(clone);
+                    frame.Clone.Size += clone.Size;
+                    frame.Clone.AllocatedSize += clone.AllocatedSize;
                     frame.Clone.FileCount++;
                 }
                 continue;
@@ -372,7 +387,9 @@ public static class ScanTreeFilter
         VolumeSerialNumber = node.VolumeSerialNumber,
         FileId = node.FileId,
         HardLinkCount = node.HardLinkCount,
-        IsAdditionalHardLink = node.IsAdditionalHardLink
+        IsAdditionalHardLink = node.IsAdditionalHardLink,
+        SharesStorage = node.SharesStorage,
+        PhysicalAllocatedSize = node.PhysicalAllocatedSize
     };
 
     private static void SortBySize(ScanNode node) => node.Children.Sort(static (left, right) =>

@@ -204,6 +204,87 @@ try
     await exporter.ExportJsonAsync(new ScanResult(deepRoot, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, [], [], []), deepJsonPath);
     Assert(File.ReadAllText(deepJsonPath).Contains("\"d59\"", StringComparison.Ordinal), "JSON export must handle deeply nested folders.");
 
+    // Hard links: the path that carries shared data must not depend on thread scheduling.
+    var linkRoot = Directory.CreateDirectory(Path.Combine(testRoot, "Links")).FullName;
+    var linkSource = Path.Combine(Directory.CreateDirectory(Path.Combine(linkRoot, "src")).FullName, "data.bin");
+    await File.WriteAllBytesAsync(linkSource, new byte[1 << 20]);
+    for (var link = 0; link < 8; link++)
+    {
+        var linkFolder = Directory.CreateDirectory(Path.Combine(linkRoot, $"link{link}")).FullName;
+        Assert(NativeTestMethods.CreateHardLink(Path.Combine(linkFolder, "data.bin"), linkSource, IntPtr.Zero), "Could not create the hard-link fan-out fixture.");
+    }
+    var linkOwners = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    ScanSnapshot? previousLinkSnapshot = null;
+    for (var run = 0; run < 25; run++)
+    {
+        var linkScan = await scanner.ScanAsync(linkRoot, new ScanOptions { Parallelism = 8 });
+        linkOwners.Add(linkScan.Root.Files().Single(static file => !file.IsAdditionalHardLink).FullPath);
+        Assert(linkScan.Root.AllocatedSize == linkScan.Root.Files().Max(static file => file.PhysicalAllocatedSize), "Shared data must be counted exactly once.");
+        Assert(linkScan.Root.Files().All(static file => file.SharesStorage && file.HardLinkCount == 0), "Every link must be marked as shared; enumeration does not know link counts (0 = unknown).");
+        var linkSnapshot = snapshotService.Create(linkScan);
+        Assert(previousLinkSnapshot is null || snapshotService.Compare(previousLinkSnapshot, linkSnapshot).Count == 0, "Unchanged hard links must not produce snapshot changes.");
+        previousLinkSnapshot = linkSnapshot;
+    }
+    Assert(linkOwners.SequenceEqual([Path.Combine(linkRoot, "link0", "data.bin")]), $"The first path in sort order must always carry shared data; saw {string.Join(", ", linkOwners)}.");
+
+    var linkResult = await scanner.ScanAsync(linkRoot);
+    var notOwner = linkResult.Root.Files().First(static file => file.IsAdditionalHardLink);
+    var oneLink = ScanTreeFilter.Apply(linkResult, new TreeFilter { NamePattern = "data.bin", Category = FileTypeCategory.Any }, DateTimeOffset.UtcNow);
+    Assert(oneLink.Root.AllocatedSize == notOwner.PhysicalAllocatedSize, "Filtering all links must still count the shared data once.");
+    var filteredSingle = ScanTreeFilter.Apply(
+        linkResult with { Root = linkResult.Root.Children.Single(child => child.Name == Path.GetFileName(Path.GetDirectoryName(notOwner.FullPath))) },
+        new TreeFilter { NamePattern = "data.bin" }, DateTimeOffset.UtcNow);
+    Assert(filteredSingle.Root.FileCount == 1 && filteredSingle.Root.AllocatedSize == notOwner.PhysicalAllocatedSize && filteredSingle.Root.AllocatedSize > 0,
+        "A filtered view holding only a link the full scan counted as zero must show the space its data uses.");
+
+    var plainScan = await scanner.ScanAsync(secondDirectory.FullName);
+    Assert(plainScan.Root.Files().Single(static file => file.Name == "unique.txt").HardLinkCount == 0, "Directory enumeration does not know link counts; they must be reported as unknown (0), not 1.");
+    var preciseScan = await scanner.ScanAsync(secondDirectory.FullName, new ScanOptions { PreciseAllocationSize = true });
+    Assert(preciseScan.Root.Files().Single(static file => file.Name == "unique.txt").HardLinkCount == 1, "Precise mode must read the real link count.");
+    var preciseLinks = await scanner.ScanAsync(linkRoot, new ScanOptions { PreciseAllocationSize = true });
+    Assert(preciseLinks.Root.Files().All(static file => file.HardLinkCount == 9 && file.SharesStorage), "Precise mode must report the real link count of hard links (9).");
+
+    // Deleting or moving items is applied to the scan: totals, attribution and statistics follow.
+    var ownerPath = Path.Combine(linkRoot, "link0", "data.bin");
+    var beforeSize = linkResult.Root.Size;
+    var edited = ScanTreeEditor.RemovePaths(linkResult, [ownerPath], DateTimeOffset.UtcNow);
+    Assert(ScanTreeEditor.Find(edited.Root, ownerPath) is null && edited.Root.Size == beforeSize - (1 << 20) && edited.Root.FileCount == 8,
+        "Removing a path must update every total above it.");
+    Assert(edited.Root.AllocatedSize == notOwner.PhysicalAllocatedSize && edited.Root.Files().Count(static file => !file.IsAdditionalHardLink) == 1,
+        "When the path carrying shared data goes, another remaining link must carry it.");
+    Assert(edited.Root.Children.Single(static child => child.Name == "link0").Size == 0, "The emptied folder must show zero.");
+    var folderGone = ScanTreeEditor.RemovePaths(edited, [Path.Combine(linkRoot, "src")], DateTimeOffset.UtcNow);
+    Assert(folderGone.Root.Size == beforeSize - (2 << 20) && folderGone.Root.FolderCount == 8 && folderGone.Extensions.Single().FileCount == 7,
+        "Removing a folder must update totals, folder counts and statistics.");
+    Assert(!snapshotService.Create(folderGone).Entries.Any(static entry => entry.RelativePath.StartsWith("src", StringComparison.OrdinalIgnoreCase)),
+        "Snapshots of an edited scan must not contain removed items.");
+
+    // Duplicates: changed files are skipped and reported, cloud-only files are never read.
+    var changedDuplicates = Directory.CreateDirectory(Path.Combine(testRoot, "Changed")).FullName;
+    await File.WriteAllBytesAsync(Path.Combine(changedDuplicates, "a.bin"), duplicateBytes);
+    await File.WriteAllBytesAsync(Path.Combine(changedDuplicates, "b.bin"), duplicateBytes);
+    var changedScan = await scanner.ScanAsync(changedDuplicates);
+    await File.WriteAllBytesAsync(Path.Combine(changedDuplicates, "a.bin"), [1]);
+    await File.WriteAllBytesAsync(Path.Combine(changedDuplicates, "b.bin"), [1]);
+    var changedResult = await new DuplicateFinder().FindAsync(changedScan.Root, minimumFileSize: 1);
+    Assert(changedResult.Groups.Count == 0 && changedResult.Issues.Count == 2 && changedResult.Issues.All(static issue => issue.ErrorType == "ChangedSinceScan"),
+        "Files that changed after the scan must be skipped and reported, not grouped with their old size.");
+    var unchangedCopy = new DuplicateFile(Path.Combine(firstDirectory.FullName, "one.bin"), duplicateBytes.Length, File.GetLastWriteTimeUtc(Path.Combine(firstDirectory.FullName, "one.bin")));
+    Assert(DuplicateFinder.IsUnchanged(unchangedCopy) && !DuplicateFinder.IsUnchanged(unchangedCopy with { Size = 1 }), "Delete-time revalidation must detect a changed duplicate.");
+
+    var cloudRoot = new ScanNode { Name = "cloud", FullPath = firstDirectory.FullName, IsDirectory = true };
+    foreach (var name in new[] { "one.bin" })
+    {
+        cloudRoot.Children.Add(new ScanNode { Name = name, FullPath = Path.Combine(firstDirectory.FullName, name), IsDirectory = false, Size = duplicateBytes.Length, Attributes = (FileAttributes)0x00400000 });
+    }
+    cloudRoot.Children.Add(new ScanNode { Name = "two.bin", FullPath = Path.Combine(secondDirectory.FullName, "two.bin"), IsDirectory = false, Size = duplicateBytes.Length, Attributes = FileAttributes.Offline });
+    var cloudResult = await new DuplicateFinder().FindAsync(cloudRoot, minimumFileSize: 1);
+    Assert(cloudResult.SkippedCloudFiles == 2 && cloudResult.Groups.Count == 0 && cloudResult.Issues.Count == 0, "Online-only cloud files must be skipped without being opened.");
+
+    // "D:" is "current directory on D:" and `"D:\"` arrives as `D:"`; both mean the drive root.
+    Assert(ScanPaths.Normalize("C:") == @"C:\" && ScanPaths.Normalize("C:\"") == @"C:\" && ScanPaths.Normalize(@"""C:\Windows""") == @"C:\Windows",
+        "Drive letters without a separator must normalize to the drive root.");
+
     using var canceled = new CancellationTokenSource();
     canceled.Cancel();
     await AssertThrowsAsync<OperationCanceledException>(() => scanner.ScanAsync(testRoot, cancellationToken: canceled.Token));

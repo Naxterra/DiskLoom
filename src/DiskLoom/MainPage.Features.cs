@@ -482,6 +482,10 @@ public sealed partial class MainPage
         {
             // A newer search or a reset replaced this one.
         }
+        catch (Exception exception)
+        {
+            SearchSummaryText.Text = exception.Message;
+        }
         finally
         {
             if (ReferenceEquals(_searchCancellation, cancellation))
@@ -750,6 +754,117 @@ public sealed partial class MainPage
         }
     }
 
+    // ---- Keeping the scan in step with deletions and moves -----------------------------------
+
+    private readonly SemaphoreSlim _scanEditLock = new(1, 1);
+    private long _duplicateSkippedCloudFiles;
+
+    // Removes deleted or moved-away items from the scan itself, so folder totals, the tree, charts,
+    // statistics, largest files, insights, snapshots and exports match the disk without a rescan.
+    private async Task ApplyRemovedPathsAsync(IReadOnlyList<string> paths)
+    {
+        foreach (var path in paths)
+        {
+            _deletedPaths.Add(path);
+        }
+        RefreshListsAfterDeletion();
+        if (paths.Count == 0)
+        {
+            return;
+        }
+
+        await _scanEditLock.WaitAsync();
+        try
+        {
+            if (_basePresentation is not { } basis)
+            {
+                return;
+            }
+            var result = basis.Result;
+            if (paths.Any(path => PathsEqual(path, result.Root.FullPath)))
+            {
+                _scanCache.Clear();
+                await RefreshAfterTreeDeletionAsync();
+                return;
+            }
+
+            // Structural changes stay on the UI thread, which is the only one that walks child lists
+            // while this runs; sizes and statistics are recomputed in the background.
+            var touched = ScanTreeEditor.Detach(result.Root, paths);
+            if (touched.Count == 0)
+            {
+                return;
+            }
+            var now = DateTimeOffset.UtcNow;
+            var edited = await Task.Run(() => ScanTreeEditor.Recompute(result, now));
+            ScanTreeEditor.SortFolders(touched);
+            var filter = _treeFilter;
+            var (updatedBase, view) = await Task.Run(() =>
+            {
+                var updated = CreatePresentation(edited);
+                return (updated, filter.IsEmpty ? updated : CreatePresentation(ScanTreeFilter.Apply(edited, filter, now)));
+            });
+            if (!ReferenceEquals(_basePresentation, basis))
+            {
+                return;
+            }
+
+            _basePresentation = updatedBase;
+            foreach (var key in _scanCache.Where(entry => ReferenceEquals(entry.Value, basis)).Select(static entry => entry.Key).ToArray())
+            {
+                _scanCache[key] = updatedBase;
+            }
+            if (ReferenceEquals(_treeFilter, filter))
+            {
+                DisplayPresentation(view, _currentNode?.FullPath);
+            }
+            else
+            {
+                await ApplyTreeFilterAsync(_treeFilter);
+            }
+        }
+        catch (Exception exception)
+        {
+            ShowNotification(exception.Message, InfoBarSeverity.Error);
+        }
+        finally
+        {
+            _scanEditLock.Release();
+        }
+    }
+
+    // While a filter is active, folders show only matching files, but deleting one removes everything in it.
+    private string FilteredDeletionNote(IReadOnlyList<string> paths)
+    {
+        if (_treeFilter.IsEmpty || _basePresentation is not { } basis)
+        {
+            return string.Empty;
+        }
+
+        var folders = paths
+            .Select(path => ScanTreeEditor.Find(basis.Result.Root, path))
+            .OfType<ScanNode>()
+            .Where(static node => node.IsDirectory)
+            .ToArray();
+        return folders.Length == 0
+            ? string.Empty
+            : Environment.NewLine + Environment.NewLine + LocalizationService.Format(
+                "FilteredDeleteWarning",
+                ByteFormatter.Format(folders.Sum(static folder => folder.Size)),
+                folders.Sum(static folder => folder.FileCount));
+    }
+
+    private void ShowDuplicateRows(IReadOnlyList<DuplicateRow> rows)
+    {
+        DuplicatesList.ItemsSource = rows;
+        var groups = rows.GroupBy(static row => row.GroupNumber).ToArray();
+        var reclaimable = groups.Sum(static group => (group.Count() - 1L) * group.First().Group.FileSize);
+        var summary = LocalizationService.Format("DuplicateSummary", groups.Length, rows.Count, ByteFormatter.Format(reclaimable));
+        DuplicateSummaryText.Text = _duplicateSkippedCloudFiles > 0
+            ? $"{summary} · {LocalizationService.Format("DuplicateSkippedCloud", _duplicateSkippedCloudFiles)}"
+            : summary;
+    }
+
     // ---- Copy / move -----------------------------------------------------------------------
 
     private async void CopyTo_Click(object sender, RoutedEventArgs e) => await TransferMenuTargetsAsync(move: false);
@@ -764,16 +879,7 @@ public sealed partial class MainPage
             return;
         }
 
-        await TransferAsync(rows.Select(static row => row.Path).ToArray(), move, moved =>
-        {
-            foreach (var path in moved)
-            {
-                _deletedPaths.Add(path);
-            }
-            _scanCache.Clear();
-            RefreshListsAfterDeletion();
-            return Task.CompletedTask;
-        });
+        await TransferAsync(rows.Select(static row => row.Path).ToArray(), move, ApplyRemovedPathsAsync);
     }
 
     private async void TreeCopyTo_Click(object sender, RoutedEventArgs e)
@@ -792,12 +898,7 @@ public sealed partial class MainPage
             return;
         }
 
-        await TransferAsync(new[] { row.FullPath }, move: true, async _ =>
-        {
-            // Like deleting a folder from the tree: rescan so totals and the tree are correct.
-            _scanCache.Clear();
-            await RefreshAfterTreeDeletionAsync();
-        });
+        await TransferAsync(new[] { row.FullPath }, move: true, ApplyRemovedPathsAsync);
     }
 
     // afterMove gets the sources that no longer exist (moved away). With Explorer's engine that is right after the

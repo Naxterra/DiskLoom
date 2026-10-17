@@ -172,7 +172,7 @@ public sealed partial class MainPage : Page
         string path;
         try
         {
-            path = Path.GetFullPath(Environment.ExpandEnvironmentVariables(requestedPath.Trim().Trim('"')));
+            path = ScanPaths.Normalize(requestedPath);
         }
         catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
         {
@@ -323,7 +323,16 @@ public sealed partial class MainPage : Page
         _navigationIndex = -1;
 
         PopulateScan(presentation);
-        ShowNode(preferredPath is not null && _nodesByPath.TryGetValue(preferredPath, out var preferred) ? preferred : result.Root);
+        var start = result.Root;
+        for (var path = preferredPath; path is not null; path = GetParentPath(path))
+        {
+            if (_nodesByPath.TryGetValue(path, out var existing))
+            {
+                start = existing;
+                break;
+            }
+        }
+        ShowNode(start);
     }
 
     private void PopulateScan(ScanPresentation presentation)
@@ -610,7 +619,7 @@ public sealed partial class MainPage : Page
 
         var dialog = CreateDialog(
             LocalizationService.Get("RecycleFolderTitle"),
-            row.FullPath,
+            row.FullPath + FilteredDeletionNote(new[] { row.FullPath }),
             LocalizationService.Get("Recycle"),
             LocalizationService.Get("Cancel"),
             ContentDialogButton.Close);
@@ -622,8 +631,7 @@ public sealed partial class MainPage : Page
         try
         {
             await _fileOperations.RecycleAsync(row.FullPath);
-            _scanCache.Clear();
-            await RefreshAfterTreeDeletionAsync();
+            await ApplyRemovedPathsAsync(new[] { row.FullPath });
             ShowNotification(LocalizationService.Get("FolderRecycled"), InfoBarSeverity.Success);
         }
         catch (Exception exception)
@@ -642,7 +650,7 @@ public sealed partial class MainPage : Page
 
         var dialog = CreateDialog(
             LocalizationService.Get("DeleteFolderTitle"),
-            LocalizationService.Format("DeleteWarning", row.FullPath),
+            LocalizationService.Format("DeleteWarning", row.FullPath) + FilteredDeletionNote(new[] { row.FullPath }),
             LocalizationService.Get("DeletePermanently"),
             LocalizationService.Get("Cancel"),
             ContentDialogButton.Close);
@@ -654,8 +662,7 @@ public sealed partial class MainPage : Page
         try
         {
             await _fileOperations.DeletePermanentlyAsync(row.FullPath);
-            _scanCache.Clear();
-            await RefreshAfterTreeDeletionAsync();
+            await ApplyRemovedPathsAsync(new[] { row.FullPath });
             ShowNotification(LocalizationService.Get("FolderDeleted"), InfoBarSeverity.Warning);
         }
         catch (Exception exception)
@@ -1428,8 +1435,8 @@ public sealed partial class MainPage : Page
         {
             var result = await _duplicateFinder.FindAsync(_scanResult.Root, minimumBytes, progress, cancellation.Token);
             var rows = result.Groups.SelectMany((group, index) => group.Files.Select(file => new DuplicateRow(index + 1, group, file))).ToArray();
-            DuplicatesList.ItemsSource = rows;
-            DuplicateSummaryText.Text = LocalizationService.Format("DuplicateSummary", result.Groups.Count, rows.Length, ByteFormatter.Format(result.ReclaimableSize));
+            _duplicateSkippedCloudFiles = result.SkippedCloudFiles;
+            ShowDuplicateRows(rows);
             StatusText.Text = LocalizationService.Get("DuplicateComplete");
             StatusDetailText.Text = LocalizationService.Format("VerifiedGroups", result.Groups.Count);
             if (result.Issues.Count > 0)
@@ -1651,7 +1658,10 @@ public sealed partial class MainPage : Page
         ApplyFilter();
         LargestFilesList.ItemsSource = WithoutDeleted(LargestFilesList.ItemsSource as IEnumerable<NodeRow>);
         InsightsList.ItemsSource = WithoutDeleted(InsightsList.ItemsSource as IEnumerable<InsightRow>);
-        DuplicatesList.ItemsSource = WithoutDeleted(DuplicatesList.ItemsSource as IEnumerable<DuplicateRow>);
+        if (WithoutDeleted(DuplicatesList.ItemsSource as IEnumerable<DuplicateRow>) is { } duplicates)
+        {
+            ShowDuplicateRows(duplicates.GroupBy(static row => row.GroupNumber).Where(static group => group.Count() > 1).SelectMany(static group => group).ToArray());
+        }
         SearchResultsList.ItemsSource = WithoutDeleted(SearchResultsList.ItemsSource as IEnumerable<NodeRow>);
     }
 
@@ -1733,7 +1743,16 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        var subject = rows.Count == 1 ? rows[0].Path : LocalizationService.Format("MultipleItemsSummary", rows.Count);
+        // A duplicate check is a snapshot: refuse to delete a copy whose content may have changed since.
+        var changed = rows.OfType<DuplicateRow>().Count(static row => !DuplicateFinder.IsUnchanged(row.File));
+        if (changed > 0)
+        {
+            ShowNotification(LocalizationService.Format("DuplicateChangedSinceCheck", changed), InfoBarSeverity.Warning);
+            return;
+        }
+
+        var subject = (rows.Count == 1 ? rows[0].Path : LocalizationService.Format("MultipleItemsSummary", rows.Count)) +
+                      FilteredDeletionNote(rows.Select(static row => row.Path).ToArray());
         var dialog = permanently
             ? CreateDialog(
                 LocalizationService.Get("DeleteTitle"),
@@ -1753,6 +1772,7 @@ public sealed partial class MainPage : Page
         }
 
         var failures = 0;
+        var removed = new List<string>();
         foreach (var row in rows)
         {
             try
@@ -1765,7 +1785,7 @@ public sealed partial class MainPage : Page
                 {
                     await _fileOperations.RecycleAsync(row.Path);
                 }
-                _deletedPaths.Add(row.Path);
+                removed.Add(row.Path);
             }
             catch
             {
@@ -1773,8 +1793,7 @@ public sealed partial class MainPage : Page
             }
         }
 
-        _scanCache.Clear();
-        RefreshListsAfterDeletion();
+        await ApplyRemovedPathsAsync(removed);
         if (failures > 0)
         {
             ShowNotification(

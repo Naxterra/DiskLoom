@@ -18,8 +18,15 @@ public sealed class ScanNode
     public FileAttributes Attributes { get; init; }
     public uint VolumeSerialNumber { get; internal set; }
     public ulong FileId { get; internal set; }
-    public uint HardLinkCount { get; internal set; } = 1;
+    // Number of hard links to the file; 0 = not queried (directory enumeration does not report it).
+    public uint HardLinkCount { get; internal set; }
+    // True for every path except the one that DiskLoom counts the shared data on.
     public bool IsAdditionalHardLink { get; internal set; }
+    // Another path in this scan refers to the same file data (a hard link).
+    public bool SharesStorage { get; internal set; }
+    // Allocation of the file's data itself; AllocatedSize is the part attributed to this path
+    // (zero for additional hard links so shared data is counted once).
+    public long PhysicalAllocatedSize { get; internal set; }
     public List<ScanNode> Children { get; init; } = [];
 
     // Running totals shared by a top-level folder and all folders below it while a scan is in
@@ -116,6 +123,9 @@ public sealed record DuplicateProgress(string Phase, long Processed, long Total,
 
 public sealed record DuplicateResult(IReadOnlyList<DuplicateGroup> Groups, IReadOnlyList<ScanIssue> Issues)
 {
+    // Cloud-only files (online-only placeholders) are not hashed: reading them would download them.
+    public long SkippedCloudFiles { get; init; }
+
     public long ReclaimableSize => Groups.Sum(static group => group.ReclaimableSize);
 }
 

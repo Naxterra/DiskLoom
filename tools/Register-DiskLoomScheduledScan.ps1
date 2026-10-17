@@ -19,7 +19,12 @@ if (-not (Test-Path -LiteralPath $resolvedExecutable -PathType Leaf)) {
     throw "DiskLoom CLI not found: $resolvedExecutable"
 }
 
-$arguments = "--scan `"$ScanPath`" --export `"$ExportPath`""
+# Windows argument parsing treats \" as a literal quote, so "D:\" would swallow the following
+# arguments; doubling trailing backslashes keeps drive roots like D:\ intact.
+function ConvertTo-QuotedArgument([string]$Value) {
+    '"' + ($Value -replace '(\\+)$', '$1$1') + '"'
+}
+$arguments = "--scan $(ConvertTo-QuotedArgument $ScanPath) --export $(ConvertTo-QuotedArgument $ExportPath)"
 $action = New-ScheduledTaskAction -Execute $resolvedExecutable -Argument $arguments
 $triggerTime = [DateTime]::Today.Add([TimeSpan]::ParseExact($At, 'hh\:mm', [Globalization.CultureInfo]::InvariantCulture))
 $trigger = if ($Schedule -eq 'Daily') {

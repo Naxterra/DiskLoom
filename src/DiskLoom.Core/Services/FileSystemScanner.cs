@@ -19,7 +19,7 @@ public sealed class FileSystemScanner
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         options ??= new ScanOptions();
 
-        var normalizedPath = Path.GetFullPath(Environment.ExpandEnvironmentVariables(path));
+        var normalizedPath = ScanPaths.Normalize(path);
         if (!Directory.Exists(normalizedPath))
         {
             throw new DirectoryNotFoundException($"The scan path does not exist: {normalizedPath}");
@@ -44,7 +44,8 @@ public sealed class FileSystemScanner
         var bytesScanned = 0L;
         var lastProgressTick = 0L;
         var visitedTargets = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
-        var physicalFiles = new ConcurrentDictionary<FileIdentity, byte>();
+        var physicalFiles = new ConcurrentDictionary<FileIdentity, ScanNode>();
+        var sharedFiles = new ConcurrentBag<ScanNode>();
         visitedTargets.TryAdd(normalizedPath, 0);
         var rootListed = 0;
         var liveProgress = progress is null
@@ -66,6 +67,7 @@ public sealed class FileSystemScanner
                             issues,
                             visitedTargets,
                             physicalFiles,
+                            sharedFiles,
                             allocationUnitSize,
                             channel.Writer,
                             ref pendingDirectories,
@@ -97,7 +99,8 @@ public sealed class FileSystemScanner
         await Task.WhenAll(workers).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
 
-        AggregateDirectories(root);
+        AttributeSharedFiles(sharedFiles);
+        SharedStorage.Aggregate(root);
         SortChildren(root);
         var (extensions, ages) = ScanStatistics.Build(root, DateTimeOffset.UtcNow);
         progress?.Report(new ScanProgress(root.FullPath, filesScanned, directoriesScanned, bytesScanned, stopwatch.Elapsed));
@@ -116,7 +119,8 @@ public sealed class FileSystemScanner
         ScanOptions options,
         ConcurrentBag<ScanIssue> issues,
         ConcurrentDictionary<string, byte> visitedTargets,
-        ConcurrentDictionary<FileIdentity, byte> physicalFiles,
+        ConcurrentDictionary<FileIdentity, ScanNode> physicalFiles,
+        ConcurrentBag<ScanNode> sharedFiles,
         long allocationUnitSize,
         ChannelWriter<ScanNode> writer,
         ref long pendingDirectories,
@@ -164,8 +168,8 @@ public sealed class FileSystemScanner
                             if (IsCloudPlaceholder(entry.ReparsePointTag))
                             {
                                 // Cloud Files placeholders are part of the visible folder namespace,
-                                // not links to another location. Enumerating their metadata does not
-                                // require downloading file contents.
+                                // not links to another location. Listing them never reads file contents,
+                                // though the sync client may fetch the folder listing itself.
                                 if (!visitedTargets.TryAdd(Path.GetFullPath(entry.FullPath), 0))
                                 {
                                     continue;
@@ -202,24 +206,17 @@ public sealed class FileSystemScanner
                     else
                     {
                         var size = entry.Length;
+                        // Directory enumeration reports no link count (0 = unknown); precise mode
+                        // opens each file and reads the real one.
                         var storage = !options.CalculateAllocatedSize
-                            ? new FileStorageInfo(size, 0, 0, 1)
-                            : entry.HasNativeAllocation
-                                ? new FileStorageInfo(entry.AllocationSize, entry.VolumeSerialNumber, entry.FileId, 1)
-                                : options.PreciseAllocationSize
-                                    ? NativeFileSize.GetStorageInfo(entry.FullPath, size)
+                            ? new FileStorageInfo(size, 0, 0, 0)
+                            : options.PreciseAllocationSize
+                                ? NativeFileSize.GetStorageInfo(entry.FullPath, size)
+                                : entry.HasNativeAllocation
+                                    ? new FileStorageInfo(entry.AllocationSize, entry.VolumeSerialNumber, entry.FileId, 0)
                                     : NativeFileSize.GetFastStorageInfo(entry.FullPath, size, entry.Attributes, allocationUnitSize);
                         var allocated = storage.AllocatedSize;
-                        var additionalHardLink = false;
-                        if (options.DeduplicateHardLinkAllocation && storage.FileId != 0)
-                        {
-                            additionalHardLink = !physicalFiles.TryAdd(new FileIdentity(storage.VolumeSerialNumber, storage.FileId), 0);
-                            if (additionalHardLink)
-                            {
-                                allocated = 0;
-                            }
-                        }
-                        directory.Children.Add(new ScanNode
+                        var file = new ScanNode
                         {
                             Name = entry.Name,
                             FullPath = entry.FullPath,
@@ -235,8 +232,21 @@ public sealed class FileSystemScanner
                             VolumeSerialNumber = storage.VolumeSerialNumber,
                             FileId = storage.FileId,
                             HardLinkCount = storage.HardLinkCount,
-                            IsAdditionalHardLink = additionalHardLink
-                        });
+                            PhysicalAllocatedSize = allocated
+                        };
+                        // Which path carries shared data is decided after the scan (AttributeSharedFiles);
+                        // deciding here would depend on which worker thread got there first.
+                        if (options.DeduplicateHardLinkAllocation && storage.FileId != 0)
+                        {
+                            var first = physicalFiles.GetOrAdd(new FileIdentity(storage.VolumeSerialNumber, storage.FileId), file);
+                            if (!ReferenceEquals(first, file))
+                            {
+                                sharedFiles.Add(first);
+                                sharedFiles.Add(file);
+                                allocated = 0;
+                            }
+                        }
+                        directory.Children.Add(file);
                         if (directory.Live is { } totals)
                         {
                             Interlocked.Add(ref totals.Size, size);
@@ -374,35 +384,22 @@ public sealed class FileSystemScanner
         };
     }
 
-    private static void AggregateDirectories(ScanNode root)
+    // Marks all paths of each shared file and counts the data once. Link counts stay as enumerated:
+    // reading them here would mean one open per group (75,000 groups on C:\ cost 9 s);
+    // precise mode already has the real count.
+    private static void AttributeSharedFiles(ConcurrentBag<ScanNode> sharedFiles)
     {
-        var stack = new Stack<(ScanNode Node, bool Visited)>();
-        stack.Push((root, false));
-        while (stack.TryPop(out var item))
+        if (sharedFiles.IsEmpty)
         {
-            if (!item.Node.IsDirectory)
-            {
-                continue;
-            }
-
-            if (!item.Visited)
-            {
-                stack.Push((item.Node, true));
-                foreach (var child in item.Node.Children)
-                {
-                    if (child.IsDirectory)
-                    {
-                        stack.Push((child, false));
-                    }
-                }
-                continue;
-            }
-
-            item.Node.Size = item.Node.Children.Sum(static child => child.Size);
-            item.Node.AllocatedSize = item.Node.Children.Sum(static child => child.AllocatedSize);
-            item.Node.FileCount = item.Node.Children.Sum(static child => child.FileCount);
-            item.Node.FolderCount = item.Node.Children.Sum(static child => child.FolderCount + (child.IsDirectory ? 1 : 0));
+            return;
         }
+
+        var files = sharedFiles.Distinct(ReferenceEqualityComparer.Instance).Cast<ScanNode>().ToArray();
+        foreach (var file in files)
+        {
+            file.SharesStorage = true;
+        }
+        SharedStorage.Attribute(files);
     }
 
     private static void SortChildren(ScanNode root)
@@ -779,7 +776,7 @@ public sealed class FileSystemScanner
         {
             if (length <= 0)
             {
-                return new FileStorageInfo(0, 0, 0, 1);
+                return new FileStorageInfo(0, 0, 0, 0);
             }
 
             if ((attributes & (FileAttributes.Compressed | FileAttributes.SparseFile)) != 0 && OperatingSystem.IsWindows())
@@ -790,7 +787,7 @@ public sealed class FileSystemScanner
                     var compressed = ((ulong)high << 32) | low;
                     if (compressed <= long.MaxValue)
                     {
-                        return new FileStorageInfo((long)compressed, 0, 0, 1);
+                        return new FileStorageInfo((long)compressed, 0, 0, 0);
                     }
                 }
             }
@@ -798,14 +795,14 @@ public sealed class FileSystemScanner
             var unit = Math.Max(512, allocationUnitSize);
             var remainder = length % unit;
             var allocated = remainder == 0 ? length : length + (unit - remainder);
-            return new FileStorageInfo(allocated, 0, 0, 1);
+            return new FileStorageInfo(allocated, 0, 0, 0);
         }
 
         public static FileStorageInfo GetStorageInfo(string path, long fallbackLength)
         {
             if (!OperatingSystem.IsWindows())
             {
-                return new FileStorageInfo(fallbackLength, 0, 0, 1);
+                return new FileStorageInfo(fallbackLength, 0, 0, 0);
             }
 
             try
@@ -840,11 +837,11 @@ public sealed class FileSystemScanner
             var low = GetCompressedFileSize(path, out var high);
             if (low == uint.MaxValue && Marshal.GetLastWin32Error() != 0)
             {
-                return new FileStorageInfo(fallbackLength, 0, 0, 1);
+                return new FileStorageInfo(fallbackLength, 0, 0, 0);
             }
 
             var value = ((ulong)high << 32) | low;
-            return new FileStorageInfo(value > long.MaxValue ? fallbackLength : (long)value, 0, 0, 1);
+            return new FileStorageInfo(value > long.MaxValue ? fallbackLength : (long)value, 0, 0, 0);
         }
 
         [DllImport("kernel32.dll", EntryPoint = "GetCompressedFileSizeW", SetLastError = true, CharSet = CharSet.Unicode)]

@@ -8,6 +8,12 @@ public sealed class DuplicateFinder
 {
     private const int SampleSize = 64 * 1024;
 
+    // Online-only cloud files (Nextcloud, OneDrive, ...): reading their contents downloads them.
+    private const FileAttributes CloudOnlyAttributes =
+        FileAttributes.Offline | (FileAttributes)0x00040000 /* RECALL_ON_OPEN */ | (FileAttributes)0x00400000 /* RECALL_ON_DATA_ACCESS */;
+
+    public static bool IsCloudOnly(ScanNode file) => (file.Attributes & CloudOnlyAttributes) != 0;
+
     public async Task<DuplicateResult> FindAsync(
         ScanNode root,
         long minimumFileSize = 1024 * 1024,
@@ -15,8 +21,10 @@ public sealed class DuplicateFinder
         CancellationToken cancellationToken = default)
     {
         var issues = new ConcurrentBag<ScanIssue>();
-        var candidates = root.Files()
-            .Where(file => file.Size >= minimumFileSize)
+        var sized = root.Files().Where(file => file.Size >= minimumFileSize).ToArray();
+        var skippedCloudFiles = sized.LongCount(IsCloudOnly);
+        var candidates = sized
+            .Where(static file => !IsCloudOnly(file))
             .GroupBy(static file => file.FileId == 0
                     ? $"PATH:{file.FullPath}"
                     : $"ID:{file.VolumeSerialNumber:X8}:{file.FileId:X16}",
@@ -59,8 +67,12 @@ public sealed class DuplicateFinder
             {
                 try
                 {
-                    var hash = await ComputeSampleHashAsync(file.FullPath, file.Size, token).ConfigureAwait(false);
+                    var hash = await ComputeSampleHashAsync(file, token).ConfigureAwait(false);
                     quickHashes.Add((file, hash));
+                }
+                catch (FileChangedException exception)
+                {
+                    issues.Add(new ScanIssue(file.FullPath, exception.Message, "ChangedSinceScan"));
                 }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
                 {
@@ -98,8 +110,15 @@ public sealed class DuplicateFinder
                         FileShare.ReadWrite | FileShare.Delete,
                         1024 * 1024,
                         FileOptions.Asynchronous | FileOptions.SequentialScan);
+                    EnsureUnchanged(stream, file);
                     var hash = await SHA256.HashDataAsync(stream, token).ConfigureAwait(false);
+                    // The share mode allows writers, so make sure nothing changed while hashing.
+                    EnsureUnchanged(stream, file);
                     fullHashes.Add((file, Convert.ToHexString(hash)));
+                }
+                catch (FileChangedException exception)
+                {
+                    issues.Add(new ScanIssue(file.FullPath, exception.Message, "ChangedSinceScan"));
                 }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
                 {
@@ -123,18 +142,51 @@ public sealed class DuplicateFinder
             .OrderByDescending(static group => group.ReclaimableSize)
             .ToArray();
 
-        return new DuplicateResult(groups, issues.OrderBy(static issue => issue.Path, StringComparer.OrdinalIgnoreCase).ToArray());
+        return new DuplicateResult(groups, issues.OrderBy(static issue => issue.Path, StringComparer.OrdinalIgnoreCase).ToArray())
+        {
+            SkippedCloudFiles = skippedCloudFiles
+        };
     }
 
-    private static async Task<string> ComputeSampleHashAsync(string path, long length, CancellationToken cancellationToken)
+    // Groups report the scanned size and date; a file that no longer has them is skipped instead.
+    private static void EnsureUnchanged(FileStream stream, ScanNode file)
     {
+        var lastWrite = File.GetLastWriteTimeUtc(stream.SafeFileHandle);
+        if (stream.Length != file.Size || (file.LastWriteUtc != default && lastWrite != file.LastWriteUtc.UtcDateTime))
+        {
+            throw new FileChangedException(file.FullPath);
+        }
+    }
+
+    // True when the file still has the size and modification time a duplicate check reported,
+    // so a later delete acts on the same content the user reviewed.
+    public static bool IsUnchanged(DuplicateFile file)
+    {
+        try
+        {
+            var info = new FileInfo(file.Path);
+            return info.Exists && info.Length == file.Size && info.LastWriteTimeUtc == file.LastWriteUtc.UtcDateTime;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private sealed class FileChangedException(string path)
+        : IOException($"The file changed after the scan and was skipped; rescan to include it: {path}");
+
+    private static async Task<string> ComputeSampleHashAsync(ScanNode file, CancellationToken cancellationToken)
+    {
+        var length = file.Size;
         await using var stream = new FileStream(
-            path,
+            file.FullPath,
             FileMode.Open,
             FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete,
             SampleSize,
             FileOptions.Asynchronous | FileOptions.RandomAccess);
+        EnsureUnchanged(stream, file);
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var buffer = new byte[SampleSize];
         var read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.24 — 2026-10-17
+
+- Duplicate search no longer reads online-only cloud files (Nextcloud, OneDrive and other placeholders): reading them downloaded them. They are skipped and the summary says how many (D:\NextCloud alone has about 19,900 such files).
+- Duplicate search skips files that changed after the scan and lists them as issues; before, a file shrunk from 1 MB to 1 byte was still reported as a 1 MB duplicate. Deleting a duplicate is refused if the file changed since the check.
+- Deleting or moving items (results list, tree, largest files, insights, duplicates, search) now updates the scan itself: folder sizes, the tree, treemap, charts, extension and age statistics, largest files, insights, snapshots and exports match the disk without a rescan. Deleting a folder from the tree no longer rescans the whole drive (C:\ with 813,000 files: about 0.5 s instead of a full scan). Duplicate groups with only one copy left disappear and the reclaimable total follows.
+- While a filter is active, the delete confirmation for folders states their full size and file count, because deleting a folder also removes the files the filter hides.
+- Hard-linked files are counted once, always on the same path (the first in sort order). Before, the path depended on thread timing, so identical scans differed and snapshot comparisons reported false changes (13 of 39 in a test). A filtered view that keeps only one link of shared data now shows the space that data uses instead of zero.
+- Link counts are no longer reported as 1 for every file: directory enumeration does not provide them, so the CSV export leaves them empty, and precise allocation mode (which opens every file) now reads the real count instead of being ignored.
+- `Register-DiskLoomScheduledScan.ps1` quotes drive roots correctly; `--scan "D:\"` used to swallow the following `--export` argument. `D:` and `D:"` (what `"D:\"` becomes on a command line) are now always read as the drive root.
+- README and privacy notes now describe the update check and in-place updates as they actually work (unsigned GitHub release MSIs verified by GitHub's SHA-256 digest, package identity and version; installed only after you confirm).
+
 ## 0.1.23 — 2026-10-03
 
 - "Copy to…" and "Move to…" hand the job to Nax-Copy when it is installed and its Explorer takeover is switched on, so they run like a paste in Explorer, in Nax-Copy's window. Without Nax-Copy (or if it doesn't answer) Windows' copy engine runs as before. After a move, DiskLoom updates its lists once the moved items are gone from their old place.

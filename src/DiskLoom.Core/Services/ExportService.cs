@@ -37,7 +37,8 @@ public sealed class ExportService
                 node.Attributes.ToString(),
                 node.VolumeSerialNumber.ToString("X8"),
                 node.FileId.ToString("X16"),
-                node.HardLinkCount.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                // Empty = not queried; directory enumeration does not report link counts.
+                node.HardLinkCount == 0 ? string.Empty : node.HardLinkCount.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 node.IsAdditionalHardLink.ToString()
             };
             await writer.WriteLineAsync(string.Join(',', fields.Select(Escape))).ConfigureAwait(false);

@@ -36,7 +36,7 @@ The reusable scanning engine is published as `Naxterra.DiskLoom.Core` under [Git
 - CSV, JSON, Excel (.xlsx), HTML, and PDF export of the whole scan or the current folder, with a folder-depth limit and an option to leave out files
 - `DiskLoom.Cli.exe` for scheduled/headless scans, exports, snapshots, and duplicate reports
 - Self-contained x64 portable output and WiX MSI with selectable Start-menu/Desktop shortcuts, Apps & Features, major upgrades, and Explorer folder/drive context menus
-- Opt-in auto-update client: HTTPS only, SHA-256 checked, Windows Authenticode chain checked, and publisher-certificate pinned
+- Update check against GitHub Releases with in-place install after you confirm: HTTPS only, SHA-256 checked against GitHub's asset digest, package identity and version checked, and Authenticode pinned when a publisher certificate is configured
 - No subscription, telemetry, account, ads, or cloud dependency
 
 ## Deliberate v1 boundaries
@@ -71,18 +71,26 @@ DiskLoom.Cli.exe --scan "\\server\share" --duplicates "D:\Reports\duplicates.csv
 
 Run `DiskLoom.Cli.exe --help` for all switches. Use `tools\Register-DiskLoomScheduledScan.ps1` to register a daily or weekly Windows scheduled task after installation.
 
-## GitHub update checks and signed updates
+## GitHub update checks and updates
 
-DiskLoom checks the public [Naxterra/DiskLoom GitHub Releases](https://github.com/Naxterra/DiskLoom/releases) API once per day and whenever **Check updates** is selected. If a newer release is present, unsigned builds open the verified GitHub release page. Direct in-app installation remains intentionally disabled until a trusted code-signing identity is configured.
+DiskLoom asks the public [Naxterra/DiskLoom GitHub Releases](https://github.com/Naxterra/DiskLoom/releases) API for the latest release at most once per day when it starts, and whenever **Check updates** is selected. The request is an ordinary HTTPS request with a `DiskLoom/<version>` user agent; it carries no scan data, file names, or device identifier. To turn the startup check off, set `"checkOnStartup": false` in `update-config.json` in the installation folder.
 
-For signed automatic installation:
+If a newer release exists, DiskLoom asks before doing anything. **Download and install** then installs the update in place and restarts DiskLoom, but only if all of these hold:
+
+- the MSI comes from this repository's own GitHub release download URL over HTTPS;
+- its SHA-256 matches the digest GitHub recorded for the uploaded asset;
+- the package belongs to DiskLoom's MSI upgrade family and carries the offered version.
+
+The release MSIs are not code-signed, so these checks establish that the file is the one published in this repository's release, not who built it: an attacker who controls the GitHub repository could publish a malicious release. That is the same trust as downloading the MSI from the release page by hand. When a publisher certificate is pinned (`-PublisherCertificateSha256` in `Build-DiskLoomInstaller.ps1`, for signed builds), the update must also carry a valid Authenticode signature from exactly that certificate.
+
+For signed builds:
 
 1. Build and sign the EXEs and MSI with `Build-DiskLoomInstaller.ps1 -CodeSigningCertificateThumbprint ...`.
 2. Pass the SHA-256 fingerprint of that publisher certificate in `-PublisherCertificateSha256` and `https://github.com/Naxterra/DiskLoom/releases/latest/download/stable.json` in `-UpdateManifestUrl`.
 3. Upload the signed MSI to a GitHub release. GitHub's SHA-256 asset digest is used automatically when available.
 4. Optionally generate and upload `stable.json` with `New-DiskLoomUpdateManifest.ps1`; it takes precedence when present.
 
-The app will never install a remote update when the feed is blank, the download hash differs, Windows rejects the Authenticode chain, or the signing certificate differs from the pinned certificate.
+DiskLoom never installs an update without asking, and never installs one whose download hash differs, whose package is not DiskLoom's, or (with a pinned certificate) whose signature Windows rejects or that a different certificate signed.
 
 ## Safety
 
@@ -91,4 +99,8 @@ The app will never install a remote update when the feed is blank, the download 
 - Cleanup insights are advisory only.
 - Recycle and permanent delete are separate commands with confirmation.
 - Access errors do not abort an otherwise useful scan and remain visible on the Issues tab.
-- Remote updates cannot fall back to unsigned packages.
+- Updates install only after confirmation and only from this repository's releases (see above).
+- Duplicate search never reads online-only cloud files (Nextcloud, OneDrive and other placeholders), because reading them would download them; it reports how many it skipped.
+- Duplicate search skips files that changed after the scan, and deleting a duplicate is refused if the file changed since the check.
+- Deleting or moving items updates the scan itself, so totals, charts, statistics, snapshots and exports match the disk without a rescan.
+- Hard-linked data is counted once, always on the same path, also in filtered views.
