@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.25 — 2026-10-17
+
+- Notifications appear at the bottom right above the status bar instead of the top right, where they covered the current tab's toolbar (for example "Auswahl im Explorer anzeigen" on the Duplicates tab looked like part of the message). Confirmations and information close by themselves after 8 seconds; warnings and errors stay until closed.
+
 ## 0.1.24 — 2026-10-17
 
 - Duplicate search no longer reads online-only cloud files (Nextcloud, OneDrive and other placeholders): reading them downloaded them. They are skipped and the summary says how many (D:\NextCloud alone has about 19,900 such files).

@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '0.1.24',
+    [string]$Version = '0.1.25',
     [string]$UpdateManifestUrl = '',
     [string]$PublisherCertificateSha256 = '',
     [string]$CodeSigningCertificateThumbprint = '',

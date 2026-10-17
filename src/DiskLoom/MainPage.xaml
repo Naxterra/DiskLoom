@@ -684,7 +684,8 @@
             <TextBlock x:Name="StatusDetailText" Grid.Column="2" Style="{StaticResource MutedTextStyle}" VerticalAlignment="Center" />
         </Grid>
 
-        <InfoBar x:Name="NotificationBar" Grid.Row="3" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="16" MaxWidth="620" IsOpen="False" IsClosable="True">
+        <!-- Bottom right: at the top it covered the toolbar of the current tab (Sort, Find duplicates, ...). -->
+        <InfoBar x:Name="NotificationBar" Grid.Row="3" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="16" MaxWidth="620" IsOpen="False" IsClosable="True">
             <InfoBar.ActionButton>
                 <Button x:Name="NotificationActionButton" x:Uid="NotificationActionButton" Content="View issues" Visibility="Collapsed" Click="NotificationActionButton_Click" />
             </InfoBar.ActionButton>

@@ -2017,6 +2017,25 @@ public sealed partial class MainPage : Page
         _notificationShowsIssues = showIssuesAction;
         NotificationActionButton.Visibility = showIssuesAction ? Visibility.Visible : Visibility.Collapsed;
         NotificationBar.IsOpen = true;
+
+        // Confirmations close by themselves; warnings and errors stay until they are dismissed.
+        _notificationTimer ??= CreateNotificationTimer();
+        _notificationTimer.Stop();
+        if (severity is InfoBarSeverity.Success or InfoBarSeverity.Informational && !showIssuesAction)
+        {
+            _notificationTimer.Start();
+        }
+    }
+
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _notificationTimer;
+
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer CreateNotificationTimer()
+    {
+        var timer = DispatcherQueue.CreateTimer();
+        timer.Interval = TimeSpan.FromSeconds(8);
+        timer.IsRepeating = false;
+        timer.Tick += (_, _) => NotificationBar.IsOpen = false;
+        return timer;
     }
 
     private static string DescribeIssues(IReadOnlyList<ScanIssue> issues)
