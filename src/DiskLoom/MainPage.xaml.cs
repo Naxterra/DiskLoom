@@ -99,6 +99,8 @@ public sealed partial class MainPage : Page
             await StartScanAsync(App.StartupScanPath);
         }
 
+        var runningVersion = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(0, 1, 0);
+        _ = Task.Run(() => UpdateService.CleanUpdateCache(runningVersion));
         _ = CheckForUpdatesAsync(interactive: false);
     }
 
@@ -247,7 +249,7 @@ public sealed partial class MainPage : Page
                 return;
             }
 
-            _scanCache[path] = presentation;
+            CacheScan(path, presentation);
             ActivateScanResult(presentation, loadedFromCache: false);
         }
         catch (OperationCanceledException)
@@ -561,7 +563,7 @@ public sealed partial class MainPage : Page
         var canDelete = row is not null && CanDeleteTreeFolder(row);
         TreeRecycleMenuItem.IsEnabled = canDelete;
         TreeDeleteMenuItem.IsEnabled = canDelete;
-        TreeCopyToMenuItem.IsEnabled = row?.Source is not null && Directory.Exists(row.FullPath);
+        TreeCopyToMenuItem.IsEnabled = row?.Source is not null && Directory.Exists(WindowsPaths.ToExtended(row.FullPath));
         TreeMoveToMenuItem.IsEnabled = canDelete;
     }
 
@@ -583,7 +585,7 @@ public sealed partial class MainPage : Page
 
     private static bool CanDeleteTreeFolder(FolderTreeRow row)
     {
-        if (row.Source?.IsDirectory != true || !Directory.Exists(row.FullPath))
+        if (row.Source?.IsDirectory != true || !Directory.Exists(WindowsPaths.ToExtended(row.FullPath)))
         {
             return false;
         }
@@ -612,7 +614,7 @@ public sealed partial class MainPage : Page
     private async void TreeRecycle_Click(object sender, RoutedEventArgs e)
     {
         var row = GetTreeContextRow();
-        if (row is null || !CanDeleteTreeFolder(row))
+        if (row is null || !CanDeleteTreeFolder(row) || RefuseTrimmedNames(new[] { row.FullPath }))
         {
             return;
         }
@@ -630,7 +632,7 @@ public sealed partial class MainPage : Page
 
         try
         {
-            await _fileOperations.RecycleAsync(row.FullPath);
+            await _fileOperations.RecycleAsync(row.FullPath, App.WindowHandle);
             await ApplyRemovedPathsAsync(new[] { row.FullPath });
             ShowNotification(LocalizationService.Get("FolderRecycled"), InfoBarSeverity.Success);
         }
@@ -1506,7 +1508,11 @@ public sealed partial class MainPage : Page
         {
             SetBusy(true, LocalizationService.Get("SavingSnapshot"));
             var path = file.Path;
-            await Task.Run(() => _snapshotService.SaveAsync(result, path));
+            await ReadScanAsync(async () =>
+            {
+                await _snapshotService.SaveAsync(result, path);
+                return true;
+            });
             StatusText.Text = LocalizationService.Format("SnapshotSaved", file.Path);
         }
         catch (Exception exception)
@@ -1515,7 +1521,7 @@ public sealed partial class MainPage : Page
         }
         finally
         {
-            SetBusy(false);
+            EndSideTask();
         }
     }
 
@@ -1543,7 +1549,7 @@ public sealed partial class MainPage : Page
         {
             SetBusy(true, LocalizationService.Get("ComparingSnapshots"));
             var path = file.Path;
-            var (older, changes) = await Task.Run(async () =>
+            var (older, changes) = await ReadScanAsync(async () =>
             {
                 var loaded = await _snapshotService.LoadAsync(path);
                 return (loaded, _snapshotService.Compare(loaded, _snapshotService.Create(result)));
@@ -1560,7 +1566,7 @@ public sealed partial class MainPage : Page
         }
         finally
         {
-            SetBusy(false);
+            EndSideTask();
         }
     }
 
@@ -1743,12 +1749,34 @@ public sealed partial class MainPage : Page
             return;
         }
 
+        // Permanent deletion addresses names ending in a dot or space exactly; the Recycle Bin cannot.
+        if (!permanently && RefuseTrimmedNames(rows.Select(static row => row.Path)))
+        {
+            return;
+        }
+
         // A duplicate check is a snapshot: refuse to delete a copy whose content may have changed since.
-        var changed = rows.OfType<DuplicateRow>().Count(static row => !DuplicateFinder.IsUnchanged(row.File));
+        var duplicates = rows.OfType<DuplicateRow>().ToArray();
+        var changed = duplicates.Count(static row => !DuplicateFinder.IsUnchanged(row.File));
         if (changed > 0)
         {
             ShowNotification(LocalizationService.Format("DuplicateChangedSinceCheck", changed), InfoBarSeverity.Warning);
             return;
+        }
+
+        // Deleting duplicates must keep at least one copy of each file, also after "Select all".
+        if (duplicates.Length > 0)
+        {
+            var listed = (DuplicatesList.ItemsSource as IEnumerable<DuplicateRow> ?? []).ToArray();
+            var losing = DuplicateFinder.GroupsLosingEveryCopy(
+                duplicates.Select(static row => row.Group).Distinct(),
+                listed.Select(static row => row.Path),
+                duplicates.Select(static row => row.Path));
+            if (losing.Count > 0)
+            {
+                ShowNotification(LocalizationService.Format("DuplicateKeepOneCopy", losing.Count), InfoBarSeverity.Warning);
+                return;
+            }
         }
 
         var subject = (rows.Count == 1 ? rows[0].Path : LocalizationService.Format("MultipleItemsSummary", rows.Count)) +
@@ -1783,7 +1811,7 @@ public sealed partial class MainPage : Page
                 }
                 else
                 {
-                    await _fileOperations.RecycleAsync(row.Path);
+                    await _fileOperations.RecycleAsync(row.Path, App.WindowHandle);
                 }
                 removed.Add(row.Path);
             }
@@ -2213,7 +2241,7 @@ public sealed partial class MainPage : Page
         {
             var path = GetUpdateStatePath();
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, DateTimeOffset.UtcNow.ToString("O"));
+            AtomicFile.WriteAllText(path, DateTimeOffset.UtcNow.ToString("O"));
         }
         catch
         {

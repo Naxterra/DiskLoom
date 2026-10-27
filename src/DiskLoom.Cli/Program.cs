@@ -146,10 +146,12 @@ internal static class DiskLoomCli
         return new CliOptions(scanPath, exportPath, snapshotPath, duplicatesPath, excludes, parallelism, minimumDuplicateBytes, followLinks, depth, includeFiles);
     }
 
-    private static async Task ExportDuplicatesAsync(DuplicateResult result, string path, CancellationToken cancellationToken)
+    private static Task ExportDuplicatesAsync(DuplicateResult result, string path, CancellationToken cancellationToken) =>
+        AtomicFile.WriteAsync(path, stream => WriteDuplicatesAsync(result, stream, cancellationToken), cancellationToken);
+
+    private static async Task WriteDuplicatesAsync(DuplicateResult result, Stream stream, CancellationToken cancellationToken)
     {
-        await using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024, true);
-        await using var writer = new StreamWriter(stream, new UTF8Encoding(true));
+        await using var writer = new StreamWriter(stream, new UTF8Encoding(true), leaveOpen: true);
         await writer.WriteLineAsync("Group,SHA256,Path,Size,ModifiedUtc,GroupReclaimable");
         for (var groupIndex = 0; groupIndex < result.Groups.Count; groupIndex++)
         {

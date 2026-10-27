@@ -2,7 +2,6 @@
 
 # DiskLoom
 
-[![Build](https://github.com/Naxterra/DiskLoom/actions/workflows/release.yml/badge.svg)](https://github.com/Naxterra/DiskLoom/actions/workflows/release.yml)
 [![Latest release](https://img.shields.io/github/v/release/Naxterra/DiskLoom)](https://github.com/Naxterra/DiskLoom/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -50,7 +49,7 @@ This distinction matters: DiskLoom 0.1 is a usable local/UNC replacement for the
 Requirements:
 
 - Windows 11
-- .NET 11 SDK (Preview 7 while .NET 11 is pre-release)
+- .NET 11 SDK (a release candidate while .NET 11 is pre-release)
 - PowerShell 7.4+
 
 ```powershell
@@ -65,7 +64,7 @@ The ready-to-install MSI is written to `artifacts\DiskLoom\installer\DiskLoom-Se
 
 ```powershell
 DiskLoom.Cli.exe --scan "D:\Data" --export "D:\Reports\disk.csv" --snapshot "D:\Reports\disk.diskloom"
-DiskLoom.Cli.exe --scan "E:\" --export "D:\Reports\usb.xlsx" --depth 3 --no-files
+DiskLoom.Cli.exe --scan E:\ --export "D:\Reports\usb.xlsx" --depth 3 --no-files
 DiskLoom.Cli.exe --scan "\\server\share" --duplicates "D:\Reports\duplicates.csv" --min-duplicate-mb 10
 ```
 
@@ -86,11 +85,15 @@ The release MSIs are not code-signed, so these checks establish that the file is
 For signed builds:
 
 1. Build and sign the EXEs and MSI with `Build-DiskLoomInstaller.ps1 -CodeSigningCertificateThumbprint ...`.
-2. Pass the SHA-256 fingerprint of that publisher certificate in `-PublisherCertificateSha256` and `https://github.com/Naxterra/DiskLoom/releases/latest/download/stable.json` in `-UpdateManifestUrl`.
+2. Pass the SHA-256 fingerprint of that publisher certificate in `-PublisherCertificateSha256`. Updates still come only from this repository's release downloads; the certificate adds the signature check.
 3. Upload the signed MSI to a GitHub release. GitHub's SHA-256 asset digest is used automatically when available.
-4. Optionally generate and upload `stable.json` with `New-DiskLoomUpdateManifest.ps1`; it takes precedence when present.
+4. Optionally generate and upload `stable.json` with `New-DiskLoomUpdateManifest.ps1`. It is used only when its version matches the release tag, so a file left over from an older release is ignored.
 
 DiskLoom never installs an update without asking, and never installs one whose download hash differs, whose package is not DiskLoom's, or (with a pinned certificate) whose signature Windows rejects or that a different certificate signed.
+
+## Uninstalling
+
+Uninstalling DiskLoom in Apps & Features removes the program, its shortcuts and the Explorer menu entries. Your own settings and caches stay in `%LOCALAPPDATA%\DiskLoom` (column layout, language, the PDF export engine's data, downloaded updates and the crash log); delete that folder to remove them as well. A scheduled scan registered with `tools\Register-DiskLoomScheduledScan.ps1` is not part of the installation, so remove it in Task Scheduler (task name `DiskLoom Storage Report`) before or after uninstalling.
 
 ## Safety
 

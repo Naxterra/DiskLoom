@@ -25,9 +25,20 @@ public sealed partial class MainWindow : Window
         AppWindow.TitleBar.ButtonForegroundColor = WindowRoot.ActualTheme == ElementTheme.Dark ? Colors.White : Colors.Black;
     }
 
+    internal bool TryReportError(Exception exception)
+    {
+        if (RootFrame.Content is not MainPage page)
+        {
+            return false;
+        }
+        page.ReportUnexpectedError(exception);
+        return true;
+    }
+
     internal void HandleRedirectedActivation(string? scanPath)
     {
-        if (AppWindow.Presenter is OverlappedPresenter presenter)
+        // Bring a minimized window back, but leave a maximized one maximized.
+        if (AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized } presenter)
         {
             presenter.Restore();
         }

@@ -102,16 +102,26 @@ public sealed class UpdateService(HttpClient? httpClient = null)
 
         var manifestAsset = release.Assets.FirstOrDefault(static asset =>
             asset.Name.Equals("stable.json", StringComparison.OrdinalIgnoreCase));
-        UpdateManifest manifest;
+        UpdateManifest? manifestFromAsset = null;
         if (manifestAsset is not null && Uri.TryCreate(manifestAsset.BrowserDownloadUrl, UriKind.Absolute, out var manifestUri))
         {
-            manifest = await _httpClient.GetFromJsonAsync<UpdateManifest>(manifestUri, cancellationToken).ConfigureAwait(false)
+            var candidate = await _httpClient.GetFromJsonAsync<UpdateManifest>(manifestUri, cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidDataException("The stable.json GitHub release asset is empty.");
-            manifest = manifest with
+            // A stable.json left over from an older release must not offer that older installer for this tag.
+            if (Version.TryParse(candidate.Version, out var manifestVersion) && SameVersion(manifestVersion, availableVersion))
             {
-                ReleaseNotes = string.IsNullOrWhiteSpace(manifest.ReleaseNotes) ? release.Body ?? string.Empty : manifest.ReleaseNotes,
-                ReleaseNotesUrl = string.IsNullOrWhiteSpace(manifest.ReleaseNotesUrl) ? release.HtmlUrl : manifest.ReleaseNotesUrl
-            };
+                manifestFromAsset = candidate with
+                {
+                    ReleaseNotes = string.IsNullOrWhiteSpace(candidate.ReleaseNotes) ? release.Body ?? string.Empty : candidate.ReleaseNotes,
+                    ReleaseNotesUrl = string.IsNullOrWhiteSpace(candidate.ReleaseNotesUrl) ? release.HtmlUrl : candidate.ReleaseNotesUrl
+                };
+            }
+        }
+
+        UpdateManifest manifest;
+        if (manifestFromAsset is not null)
+        {
+            manifest = manifestFromAsset;
         }
         else
         {
@@ -171,11 +181,20 @@ public sealed class UpdateService(HttpClient? httpClient = null)
 
     // Unsigned builds install only DiskLoom MSIs downloaded from this repository's own GitHub releases;
     // a pinned publisher certificate additionally requires a matching Authenticode signature.
-    public static bool CanInstallDirectly(UpdateManifest manifest, UpdateConfiguration configuration) =>
-        manifest.HasVerifiableInstaller &&
-        (!string.IsNullOrWhiteSpace(configuration.PublisherCertificateSha256) ||
-         (IsRepositoryDownload(manifest.InstallerUrl, configuration.GitHubRepository) &&
-          Path.GetExtension(new Uri(manifest.InstallerUrl).AbsolutePath).Equals(".msi", StringComparison.OrdinalIgnoreCase)));
+    // With a GitHub repository configured, an update must always be an MSI from that repository's release downloads,
+    // signed or not, so the package checks (UpgradeCode and version) always run. A pinned certificate only adds the
+    // Authenticode check. A bare manifest feed without a repository is accepted only together with a pinned certificate.
+    public static bool CanInstallDirectly(UpdateManifest manifest, UpdateConfiguration configuration)
+    {
+        if (!manifest.HasVerifiableInstaller)
+        {
+            return false;
+        }
+        var isMsi = Path.GetExtension(new Uri(manifest.InstallerUrl).AbsolutePath).Equals(".msi", StringComparison.OrdinalIgnoreCase);
+        return string.IsNullOrWhiteSpace(configuration.GitHubRepository)
+            ? !string.IsNullOrWhiteSpace(configuration.PublisherCertificateSha256)
+            : isMsi && IsRepositoryDownload(manifest.InstallerUrl, configuration.GitHubRepository);
+    }
 
     private static bool IsRepositoryDownload(string url, string repository) =>
         !string.IsNullOrWhiteSpace(repository) &&
@@ -183,6 +202,40 @@ public sealed class UpdateService(HttpClient? httpClient = null)
         uri.Scheme == Uri.UriSchemeHttps &&
         uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase) &&
         uri.AbsolutePath.StartsWith($"/{repository.Trim().Trim('/')}/releases/download/", StringComparison.OrdinalIgnoreCase);
+
+    private static bool SameVersion(Version left, Version right) =>
+        left.Major == right.Major && left.Minor == right.Minor && Math.Max(0, left.Build) == Math.Max(0, right.Build);
+
+    public static string UpdateCacheFolder => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "DiskLoom",
+        "Updates");
+
+    // Removes downloaded installers for this version and older ones (they are only needed until they have run),
+    // including partial downloads left by an interrupted update.
+    public static void CleanUpdateCache(Version currentVersion, string? cacheFolder = null)
+    {
+        var folder = cacheFolder ?? UpdateCacheFolder;
+        if (!Directory.Exists(folder))
+        {
+            return;
+        }
+        foreach (var versionFolder in Directory.EnumerateDirectories(folder))
+        {
+            if (Version.TryParse(Path.GetFileName(versionFolder), out var version) &&
+                (version < currentVersion || SameVersion(version, currentVersion)))
+            {
+                try
+                {
+                    Directory.Delete(versionFolder, recursive: true);
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    // An installer still running from there keeps its files; the next start retries.
+                }
+            }
+        }
+    }
 
     private static bool TryParseReleaseVersion(string tag, out Version version)
     {
@@ -234,9 +287,10 @@ public sealed class UpdateService(HttpClient? httpClient = null)
         using var response = await _httpClient.GetAsync(installerUri, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
         var total = response.Content.Headers.ContentLength;
-        await using (var source = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false))
-        await using (var target = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None, 128 * 1024, true))
+        try
         {
+            await using var source = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            await using var target = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None, 128 * 1024, true);
             var buffer = new byte[128 * 1024];
             long received = 0;
             int read;
@@ -249,6 +303,12 @@ public sealed class UpdateService(HttpClient? httpClient = null)
                     progress?.Report((double)received / total.Value);
                 }
             }
+        }
+        catch
+        {
+            // A broken or canceled download must not leave a partial installer behind.
+            File.Delete(temporary);
+            throw;
         }
 
         byte[] actualHash;

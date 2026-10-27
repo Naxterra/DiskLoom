@@ -109,7 +109,7 @@ internal static class ResultColumns
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
-            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(columns.Select(static key => key.ToString()).ToArray()));
+            DiskLoom.Core.Services.AtomicFile.WriteAllText(SettingsPath, JsonSerializer.Serialize(columns.Select(static key => key.ToString()).ToArray()));
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {

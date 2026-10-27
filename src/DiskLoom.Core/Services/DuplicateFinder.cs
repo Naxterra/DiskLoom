@@ -14,6 +14,24 @@ public sealed class DuplicateFinder
 
     public static bool IsCloudOnly(ScanNode file) => (file.Attributes & CloudOnlyAttributes) != 0;
 
+    // Groups in which every copy that still exists is among the paths about to be deleted. Deleting duplicates must
+    // keep at least one copy, so a selection like "select all, delete" is refused for these groups.
+    public static IReadOnlyList<DuplicateGroup> GroupsLosingEveryCopy(
+        IEnumerable<DuplicateGroup> groups,
+        IEnumerable<string> remainingPaths,
+        IEnumerable<string> deletingPaths)
+    {
+        var remaining = remainingPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var deleting = deletingPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return groups
+            .Where(group =>
+            {
+                var left = group.Files.Select(static file => file.Path).Where(remaining.Contains).ToArray();
+                return left.Length > 0 && left.All(deleting.Contains);
+            })
+            .ToArray();
+    }
+
     public async Task<DuplicateResult> FindAsync(
         ScanNode root,
         long minimumFileSize = 1024 * 1024,
@@ -104,7 +122,7 @@ public sealed class DuplicateFinder
                 try
                 {
                     await using var stream = new FileStream(
-                        file.FullPath,
+                        WindowsPaths.ToExtended(file.FullPath),
                         FileMode.Open,
                         FileAccess.Read,
                         FileShare.ReadWrite | FileShare.Delete,
@@ -164,7 +182,7 @@ public sealed class DuplicateFinder
     {
         try
         {
-            var info = new FileInfo(file.Path);
+            var info = new FileInfo(WindowsPaths.ToExtended(file.Path));
             return info.Exists && info.Length == file.Size && info.LastWriteTimeUtc == file.LastWriteUtc.UtcDateTime;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
@@ -180,7 +198,7 @@ public sealed class DuplicateFinder
     {
         var length = file.Size;
         await using var stream = new FileStream(
-            file.FullPath,
+            WindowsPaths.ToExtended(file.FullPath),
             FileMode.Open,
             FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete,

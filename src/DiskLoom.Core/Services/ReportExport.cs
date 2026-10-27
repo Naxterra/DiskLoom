@@ -87,13 +87,17 @@ public sealed class ReportExportService
         string destinationPath,
         ExportOptions options,
         ReportText? text = null,
-        CancellationToken cancellationToken = default) => Task.Run(() =>
+        CancellationToken cancellationToken = default) =>
+        AtomicFile.WriteAsync(
+            destinationPath,
+            stream => Task.Run(() => WriteWorkbook(result, stream, options, text ?? new ReportText(), cancellationToken), cancellationToken),
+            cancellationToken);
+
+    private static ExportSummary WriteWorkbook(ScanResult result, Stream file, ExportOptions options, ReportText text, CancellationToken cancellationToken)
     {
-        text ??= new ReportText();
         // Excel's hard limit is 1,048,576 rows including the header.
         var limit = Math.Min(options.MaximumRows, 1_048_575);
-        using var file = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024);
-        using var zip = new ZipArchive(file, ZipArchiveMode.Create);
+        using var zip = new ZipArchive(file, ZipArchiveMode.Create, leaveOpen: true);
         WritePart(zip, "[Content_Types].xml", """
             <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
             <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>
@@ -129,7 +133,7 @@ public sealed class ReportExportService
             WriteExtensionSheet(writer, result, text);
         }
         return new ExportSummary(written, truncated);
-    }, cancellationToken);
+    }
 
     public async Task<ExportSummary> ExportHtmlAsync(
         ScanResult result,
@@ -142,7 +146,11 @@ public sealed class ReportExportService
         text ??= new ReportText();
         culture ??= CultureInfo.CurrentCulture;
         var (html, summary) = await Task.Run(() => BuildHtml(result, options, text, culture, cancellationToken), cancellationToken).ConfigureAwait(false);
-        await File.WriteAllTextAsync(destinationPath, html, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), cancellationToken).ConfigureAwait(false);
+        await AtomicFile.WriteAsync(destinationPath, async stream =>
+        {
+            var bytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(html);
+            await stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+        }, cancellationToken).ConfigureAwait(false);
         return summary;
     }
 

@@ -341,7 +341,7 @@ public sealed partial class MainPage
         try
         {
             var stopwatch = Stopwatch.StartNew();
-            var presentation = await Task.Run(() => CreatePresentation(ScanTreeFilter.Apply(basis.Result, filter, DateTimeOffset.UtcNow)));
+            var presentation = await ReadScanAsync(() => CreatePresentation(ScanTreeFilter.Apply(basis.Result, filter, DateTimeOffset.UtcNow)));
             if (!ReferenceEquals(_basePresentation, basis))
             {
                 return;
@@ -360,7 +360,7 @@ public sealed partial class MainPage
         }
         finally
         {
-            SetBusy(false);
+            EndSideTask();
         }
     }
 
@@ -460,7 +460,7 @@ public sealed partial class MainPage
         try
         {
             var stopwatch = Stopwatch.StartNew();
-            var found = await Task.Run(() => ScanSearch.Search(root, criteria, cancellation.Token), cancellation.Token);
+            var found = await ReadScanAsync(() => ScanSearch.Search(root, criteria, cancellation.Token), cancellation.Token);
             if (!ReferenceEquals(_searchCancellation, cancellation) || !ReferenceEquals(_scanResult, result))
             {
                 return;
@@ -557,7 +557,7 @@ public sealed partial class MainPage
             // Subfolders are already summed; the other breakdowns walk every file below the folder.
             slices = kind == BreakdownKind.Children
                 ? FolderBreakdown.Create(folder, kind, ChartSliceLimit, DateTimeOffset.UtcNow)
-                : await Task.Run(() => FolderBreakdown.Create(folder, kind, ChartSliceLimit, DateTimeOffset.UtcNow));
+                : await ReadScanAsync(() => FolderBreakdown.Create(folder, kind, ChartSliceLimit, DateTimeOffset.UtcNow));
         }
         catch (Exception exception)
         {
@@ -773,6 +773,16 @@ public sealed partial class MainPage
             return;
         }
 
+        // The scanned folder itself is gone: scan its parent instead (this takes the lock itself).
+        if (_basePresentation is { } current && paths.Any(path => PathsEqual(path, current.Result.Root.FullPath)))
+        {
+            _scanCache.Clear();
+            await RefreshAfterTreeDeletionAsync();
+            return;
+        }
+
+        // Reapplying a changed filter takes the lock itself, so it runs after the lock is released.
+        var reapplyFilter = false;
         await _scanEditLock.WaitAsync();
         try
         {
@@ -781,12 +791,6 @@ public sealed partial class MainPage
                 return;
             }
             var result = basis.Result;
-            if (paths.Any(path => PathsEqual(path, result.Root.FullPath)))
-            {
-                _scanCache.Clear();
-                await RefreshAfterTreeDeletionAsync();
-                return;
-            }
 
             // Structural changes stay on the UI thread, which is the only one that walks child lists
             // while this runs; sizes and statistics are recomputed in the background.
@@ -820,7 +824,7 @@ public sealed partial class MainPage
             }
             else
             {
-                await ApplyTreeFilterAsync(_treeFilter);
+                reapplyFilter = true;
             }
         }
         catch (Exception exception)
@@ -830,6 +834,85 @@ public sealed partial class MainPage
         finally
         {
             _scanEditLock.Release();
+        }
+
+        if (reapplyFilter)
+        {
+            await ApplyTreeFilterAsync(_treeFilter);
+        }
+    }
+
+    // Background work that walks the scan tree shares the lock with deletions and moves, so it never reads a tree
+    // while child lists are being removed or totals recomputed.
+    private async Task<T> ReadScanAsync<T>(Func<T> work, CancellationToken cancellationToken = default)
+    {
+        await _scanEditLock.WaitAsync(cancellationToken);
+        try
+        {
+            return await Task.Run(work, cancellationToken);
+        }
+        finally
+        {
+            _scanEditLock.Release();
+        }
+    }
+
+    private async Task<T> ReadScanAsync<T>(Func<Task<T>> work, CancellationToken cancellationToken = default)
+    {
+        await _scanEditLock.WaitAsync(cancellationToken);
+        try
+        {
+            return await Task.Run(work, cancellationToken);
+        }
+        finally
+        {
+            _scanEditLock.Release();
+        }
+    }
+
+    private ScanNode? CurrentScanRoot => (_basePresentation?.Result ?? _scanResult)?.Root;
+
+    // A whole drive costs hundreds of MB in memory, so only the most recently scanned drives and folders are kept.
+    private const int ScanCacheLimit = 4;
+    private readonly List<string> _scanCacheOrder = [];
+
+    private void CacheScan(string path, ScanPresentation presentation)
+    {
+        _scanCache[path] = presentation;
+        _scanCacheOrder.RemoveAll(entry => entry.Equals(path, StringComparison.OrdinalIgnoreCase));
+        _scanCacheOrder.Add(path);
+        while (_scanCacheOrder.Count > ScanCacheLimit)
+        {
+            _scanCache.Remove(_scanCacheOrder[0]);
+            _scanCacheOrder.RemoveAt(0);
+        }
+    }
+
+    internal void ReportUnexpectedError(Exception exception)
+    {
+        EndSideTask();
+        ShowNotification(LocalizationService.Format("UnexpectedError", exception.Message), InfoBarSeverity.Error);
+    }
+
+    // Windows drops a trailing dot or space from names, so Explorer's engine and the Recycle Bin would act on a
+    // different item. Permanent deletion handles such names exactly; everything else refuses them up front.
+    private bool RefuseTrimmedNames(IEnumerable<string> paths)
+    {
+        var trimmed = paths.FirstOrDefault(WindowsPaths.HasTrimmedSegment);
+        if (trimmed is null)
+        {
+            return false;
+        }
+        ShowNotification(LocalizationService.Format("TrimmedNameRefused", trimmed), InfoBarSeverity.Warning);
+        return true;
+    }
+
+    // A task that ran beside a scan (export, snapshot, copy, filter) must not hide the scan's progress or its Cancel button.
+    private void EndSideTask()
+    {
+        if (_workCancellation is null)
+        {
+            SetBusy(false);
         }
     }
 
@@ -905,6 +988,11 @@ public sealed partial class MainPage
     // operation; with Nax-Copy, which runs the job in its own window, once the moved items are gone.
     private async Task TransferAsync(IReadOnlyList<string> sources, bool move, Func<IReadOnlyList<string>, Task>? afterMove = null)
     {
+        if (RefuseTrimmedNames(sources))
+        {
+            return;
+        }
+
         var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.ComputerFolder };
         picker.FileTypeFilter.Add("*");
         WinRT.Interop.InitializeWithWindow.Initialize(picker, App.WindowHandle);
@@ -928,10 +1016,16 @@ public sealed partial class MainPage
 
         var scanRoot = (_basePresentation?.Result ?? _scanResult)?.Root.FullPath;
         var landsInScan = scanRoot is not null && IsSameOrInside(destination, scanRoot);
-        if (await NaxCopyHandoff.TrySendAsync(move ? NaxCopyOperation.Move : NaxCopyOperation.Copy, destination, sources))
+        var handoff = await NaxCopyHandoff.TrySendAsync(move ? NaxCopyOperation.Move : NaxCopyOperation.Copy, destination, sources);
+        if (handoff != NaxCopyHandoffResult.NotDelivered)
         {
-            var handedOver = LocalizationService.Format(move ? "MoveHandedToNaxCopy" : "CopyHandedToNaxCopy", sources.Count, destination);
-            ShowNotification(landsInScan ? $"{handedOver} {LocalizationService.Get("RescanToSeeTransfer")}" : handedOver, InfoBarSeverity.Informational);
+            // Unconfirmed means Nax-Copy got the job but did not answer in time; running it here as well could copy
+            // everything twice or let two engines move the same files, so the job stays with Nax-Copy.
+            var handedOver = handoff == NaxCopyHandoffResult.Accepted
+                ? LocalizationService.Format(move ? "MoveHandedToNaxCopy" : "CopyHandedToNaxCopy", sources.Count, destination)
+                : LocalizationService.Get("NaxCopyUnconfirmed");
+            ShowNotification(landsInScan ? $"{handedOver} {LocalizationService.Get("RescanToSeeTransfer")}" : handedOver,
+                handoff == NaxCopyHandoffResult.Accepted ? InfoBarSeverity.Informational : InfoBarSeverity.Warning);
             if (move && afterMove is not null)
             {
                 _ = ApplyWhenMovedAsync(sources, afterMove);
@@ -974,7 +1068,7 @@ public sealed partial class MainPage
         }
         finally
         {
-            SetBusy(false);
+            EndSideTask();
         }
     }
 
@@ -982,18 +1076,20 @@ public sealed partial class MainPage
     // to six hours), update the view as after a move with Explorer's engine — unless another scan has replaced this one.
     private async Task ApplyWhenMovedAsync(IReadOnlyList<string> sources, Func<IReadOnlyList<string>, Task> afterMove)
     {
-        var scan = _scanResult;
+        // Deleting, moving or filtering replaces the scan result object but keeps its root folder; only a new scan
+        // changes the root, and then the moved items are no longer part of what is shown.
+        var root = CurrentScanRoot;
         var deadline = DateTime.UtcNow.AddHours(6);
         while (DateTime.UtcNow < deadline && sources.Any(static source => File.Exists(source) || Directory.Exists(source)))
         {
             await Task.Delay(TimeSpan.FromSeconds(1));
-            if (!ReferenceEquals(scan, _scanResult))
+            if (!ReferenceEquals(root, CurrentScanRoot))
             {
                 return;
             }
         }
         var gone = sources.Where(static source => !File.Exists(source) && !Directory.Exists(source)).ToArray();
-        if (gone.Length > 0 && ReferenceEquals(scan, _scanResult))
+        if (gone.Length > 0 && ReferenceEquals(root, CurrentScanRoot))
         {
             await afterMove(gone);
         }
@@ -1127,6 +1223,8 @@ public sealed partial class MainPage
         var text = CreateReportText();
         var culture = System.Globalization.CultureInfo.CurrentCulture;
         SetBusy(true, LocalizationService.Get("Exporting"));
+        // The whole export reads the scan tree; a deletion meanwhile waits so the file shows one consistent state.
+        await _scanEditLock.WaitAsync();
         try
         {
             // A sub-folder export needs its own type statistics.
@@ -1180,7 +1278,8 @@ public sealed partial class MainPage
         }
         finally
         {
-            SetBusy(false);
+            _scanEditLock.Release();
+            EndSideTask();
         }
     }
 

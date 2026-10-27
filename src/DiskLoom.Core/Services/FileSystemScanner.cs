@@ -284,7 +284,7 @@ public sealed class FileSystemScanner
 
     private static IEnumerable<DirectoryEntryData> EnumerateManaged(string path)
     {
-        var info = new DirectoryInfo(path);
+        var info = new DirectoryInfo(WindowsPaths.ToExtended(path));
         foreach (var entry in info.EnumerateFileSystemInfos("*", new EnumerationOptions
         {
             IgnoreInaccessible = false,
@@ -295,9 +295,10 @@ public sealed class FileSystemScanner
         {
             var attributes = entry.Attributes;
             var isDirectory = (attributes & FileAttributes.Directory) != 0;
+            // entry.FullName carries the \\?\ prefix; scan paths stay in the ordinary form.
             yield return new DirectoryEntryData(
                 entry.Name,
-                entry.FullName,
+                Path.Combine(path, entry.Name),
                 isDirectory,
                 isDirectory ? 0 : ((FileInfo)entry).Length,
                 0,
@@ -541,7 +542,7 @@ public sealed class FileSystemScanner
             }
 
             using var handle = CreateFile(
-                directoryPath,
+                WindowsPaths.ToExtended(directoryPath),
                 FileListDirectory,
                 FileShareRead | FileShareWrite | FileShareDelete,
                 IntPtr.Zero,
@@ -657,7 +658,7 @@ public sealed class FileSystemScanner
             }
 
             using var handle = CreateFile(
-                path,
+                WindowsPaths.ToExtended(path),
                 0,
                 FileShareRead | FileShareWrite | FileShareDelete,
                 IntPtr.Zero,
@@ -781,7 +782,7 @@ public sealed class FileSystemScanner
 
             if ((attributes & (FileAttributes.Compressed | FileAttributes.SparseFile)) != 0 && OperatingSystem.IsWindows())
             {
-                var low = GetCompressedFileSize(path, out var high);
+                var low = GetCompressedFileSize(WindowsPaths.ToExtended(path), out var high);
                 if (low != uint.MaxValue || Marshal.GetLastWin32Error() == 0)
                 {
                     var compressed = ((ulong)high << 32) | low;
@@ -808,7 +809,7 @@ public sealed class FileSystemScanner
             try
             {
                 using var handle = File.OpenHandle(
-                    path,
+                    WindowsPaths.ToExtended(path),
                     FileMode.Open,
                     FileAccess.Read,
                     FileShare.ReadWrite | FileShare.Delete,
@@ -834,7 +835,7 @@ public sealed class FileSystemScanner
                 // Fall through to the path-based API, which can succeed with less access.
             }
 
-            var low = GetCompressedFileSize(path, out var high);
+            var low = GetCompressedFileSize(WindowsPaths.ToExtended(path), out var high);
             if (low == uint.MaxValue && Marshal.GetLastWin32Error() != 0)
             {
                 return new FileStorageInfo(fallbackLength, 0, 0, 0);

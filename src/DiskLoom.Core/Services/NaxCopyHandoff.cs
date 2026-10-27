@@ -9,6 +9,8 @@ namespace DiskLoom.Core.Services;
 
 public enum NaxCopyOperation { Copy = 0, Move = 1 }
 
+public enum NaxCopyHandoffResult { NotDelivered, Accepted, Unconfirmed }
+
 /// <summary>
 /// Hands copy and move jobs to Nax-Copy (the owner's replacement for Explorer's copy engine) when it is installed, over the
 /// named pipe its Explorer extension uses, so DiskLoom's "Copy to…" and "Move to…" run like a paste in Explorer.
@@ -31,40 +33,50 @@ public static class NaxCopyHandoff
             {
                 return null;
             }
-            using (var user = Registry.CurrentUser.OpenSubKey(@"Software\NaxCopy"))
+            using var user = Registry.CurrentUser.OpenSubKey(@"Software\NaxCopy");
+            if (user?.GetValue("ExplorerIntegration") is int enabled && enabled == 0)
             {
-                if (user?.GetValue("ExplorerIntegration") is int enabled && enabled == 0)
+                return null;
+            }
+            // The machine-wide registration is written by the installer and is not writable without elevation, so it
+            // wins. The per-user path is only a fallback, and never in an elevated DiskLoom, where any program running
+            // as the user could otherwise point it at something that then starts elevated.
+            using (var machine = Registry.LocalMachine.OpenSubKey(@"Software\NaxCopy"))
+            {
+                if (machine?.GetValue("AppPath") is string machinePath && File.Exists(machinePath))
                 {
-                    return null;
-                }
-                if (user?.GetValue("AppPath") is string userPath && File.Exists(userPath))
-                {
-                    return userPath;
+                    return machinePath;
                 }
             }
-            using var machine = Registry.LocalMachine.OpenSubKey(@"Software\NaxCopy");
-            return machine?.GetValue("AppPath") is string path && File.Exists(path) ? path : null;
+            if (Environment.IsPrivilegedProcess)
+            {
+                return null;
+            }
+            return user?.GetValue("AppPath") is string userPath && File.Exists(userPath) ? userPath : null;
         }
     }
 
     private static string PipeName => $"NaxCopy-{Process.GetCurrentProcess().SessionId}";
 
     /// <summary>
-    /// True when Nax-Copy accepted the job (it then runs it in its own window); false when it isn't installed, is
-    /// switched off or doesn't answer — the caller then copies with Explorer's engine as before.
+    /// Accepted when Nax-Copy took the job (it then runs it in its own window). NotDelivered when it isn't installed,
+    /// is switched off, could not be reached or refused the job; the caller then uses Explorer's engine as before.
+    /// Unconfirmed when the job was sent but no answer came back: Nax-Copy may be running it, so the caller must not
+    /// start the same job a second time.
     /// </summary>
-    public static async Task<bool> TrySendAsync(NaxCopyOperation operation, string destination, IReadOnlyList<string> sources, CancellationToken cancellationToken = default)
+    public static async Task<NaxCopyHandoffResult> TrySendAsync(NaxCopyOperation operation, string destination, IReadOnlyList<string> sources, CancellationToken cancellationToken = default)
     {
         if (sources.Count == 0 || AppPath is not { } app)
         {
-            return false;
+            return NaxCopyHandoffResult.NotDelivered;
         }
+        var sent = false;
         try
         {
             await using var pipe = await ConnectAsync(app, cancellationToken);
             if (pipe is null)
             {
-                return false;
+                return NaxCopyHandoffResult.NotDelivered;
             }
             if (GetNamedPipeServerProcessId(pipe.SafePipeHandle.DangerousGetHandle(), out var server))
             {
@@ -73,13 +85,18 @@ public static class NaxCopyHandoff
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(AckTimeout);
-            await pipe.WriteAsync(Serialize(operation, destination, sources), timeout.Token);
+            var message = Serialize(operation, destination, sources);
+            sent = true;
+            await pipe.WriteAsync(message, timeout.Token);
             var ack = new byte[1];
-            return await pipe.ReadAsync(ack, timeout.Token) == 1 && ack[0] == 1;
+            var answered = await pipe.ReadAsync(ack, timeout.Token) == 1;
+            return !answered ? NaxCopyHandoffResult.Unconfirmed
+                : ack[0] == 1 ? NaxCopyHandoffResult.Accepted
+                : NaxCopyHandoffResult.NotDelivered;
         }
         catch (Exception exception) when (exception is IOException or OperationCanceledException or TimeoutException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
         {
-            return false;
+            return sent ? NaxCopyHandoffResult.Unconfirmed : NaxCopyHandoffResult.NotDelivered;
         }
     }
 

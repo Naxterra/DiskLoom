@@ -9,10 +9,12 @@ public sealed class ExportService
     public Task ExportCsvAsync(ScanResult result, string destinationPath, CancellationToken cancellationToken = default) =>
         ExportCsvAsync(result, destinationPath, new ExportOptions(), cancellationToken);
 
-    public async Task<ExportSummary> ExportCsvAsync(ScanResult result, string destinationPath, ExportOptions options, CancellationToken cancellationToken = default)
+    public Task<ExportSummary> ExportCsvAsync(ScanResult result, string destinationPath, ExportOptions options, CancellationToken cancellationToken = default) =>
+        AtomicFile.WriteAsync(destinationPath, stream => WriteCsvAsync(result, stream, options, cancellationToken), cancellationToken);
+
+    private static async Task<ExportSummary> WriteCsvAsync(ScanResult result, Stream stream, ExportOptions options, CancellationToken cancellationToken)
     {
-        await using var stream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024, true);
-        await using var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        await using var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true), leaveOpen: true);
         await writer.WriteLineAsync("Path,Kind,Size,AllocatedSize,Files,Folders,CreatedUtc,ModifiedUtc,AccessedUtc,Attributes,VolumeSerial,FileId,HardLinkCount,AdditionalHardLink").ConfigureAwait(false);
         var written = 0L;
         foreach (var row in ReportExportService.EnumerateRows(result.Root, options))
@@ -47,17 +49,14 @@ public sealed class ExportService
         return new ExportSummary(written, IsTruncated: false);
     }
 
-    public async Task ExportJsonAsync(ScanResult result, string destinationPath, CancellationToken cancellationToken = default)
-    {
-        await using var stream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024, true);
-        await JsonSerializer.SerializeAsync(stream, result, new JsonSerializerOptions(JsonSerializerDefaults.Web)
+    public Task ExportJsonAsync(ScanResult result, string destinationPath, CancellationToken cancellationToken = default) =>
+        AtomicFile.WriteAsync(destinationPath, stream => JsonSerializer.SerializeAsync(stream, result, new JsonSerializerOptions(JsonSerializerDefaults.Web)
         {
             WriteIndented = true,
             // Each folder level nests a node object inside a Children array; the default
             // limit of 64 fails for trees only ~31 folders deep.
             MaxDepth = Math.Max(64, GetTreeDepth(result.Root) * 2 + 8)
-        }, cancellationToken).ConfigureAwait(false);
-    }
+        }, cancellationToken), cancellationToken);
 
     private static int GetTreeDepth(ScanNode root)
     {

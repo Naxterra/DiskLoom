@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using DiskLoom.Core.Models;
-using Microsoft.VisualBasic.FileIO;
 
 namespace DiskLoom.Core.Services;
 
@@ -111,35 +110,73 @@ public sealed class StorageInsightService
     }
 }
 
+// Windows silently drops a trailing dot or space from every path segment, so on a drive written by Linux or macOS
+// "Backup " means "Backup" to ordinary Win32 calls. These helpers keep file operations on the item actually named.
+public static class WindowsPaths
+{
+    // True when a segment ends in a dot or space; Explorer's engine and the Recycle Bin cannot address such items.
+    public static bool HasTrimmedSegment(string path) =>
+        StripExtendedPrefix(path)
+            .Split(['\\', '/'], StringSplitOptions.RemoveEmptyEntries)
+            .Any(static segment => segment is not "." and not ".." && (segment.EndsWith('.') || segment.EndsWith(' ')));
+
+    // Paths with the \\?\ prefix reach the file system unchanged, without that trimming.
+    public static string ToExtended(string path)
+    {
+        if (path.StartsWith(@"\\?\", StringComparison.Ordinal) || path.StartsWith(@"\\.\", StringComparison.Ordinal))
+        {
+            return path;
+        }
+        return path.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + path[2..] : @"\\?\" + path;
+    }
+
+    public static string StripExtendedPrefix(string path) =>
+        path.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase) ? @"\\" + path[8..]
+        : path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path[4..]
+        : path;
+}
+
 public sealed class FileOperationService
 {
-    public Task RecycleAsync(string path, CancellationToken cancellationToken = default) => Task.Run(() =>
+    // Recycles with Explorer's engine and lets it warn before anything would be deleted for good instead. Removable
+    // drives have no Recycle Bin and items larger than the bin do not fit; the previous call removed those silently.
+    public async Task RecycleAsync(string path, nint ownerWindow = 0, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (File.Exists(path))
+        if (WindowsPaths.HasTrimmedSegment(path))
         {
-            FileSystem.DeleteFile(path, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin);
+            throw new IOException($"The name ends with a dot or space, which the Recycle Bin cannot handle safely: {path}");
         }
-        else if (Directory.Exists(path))
-        {
-            FileSystem.DeleteDirectory(path, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin);
-        }
-        else
+        var extended = WindowsPaths.ToExtended(path);
+        if (!File.Exists(extended) && !Directory.Exists(extended))
         {
             throw new FileNotFoundException("The selected item no longer exists.", path);
         }
-    }, cancellationToken);
+
+        var result = await RunShellFileOperationAsync(FoDelete, [path], destinationFolder: null, ownerWindow,
+            FofAllowUndo | FofNoConfirmation | FofWantNukeWarning).ConfigureAwait(false);
+        if (result.Aborted)
+        {
+            throw new OperationCanceledException("Moving the item to the Recycle Bin was canceled.");
+        }
+        if (result.ErrorCode != 0)
+        {
+            throw new IOException($"Windows reported error {result.ErrorCode} while moving the item to the Recycle Bin: {path}");
+        }
+    }
 
     public Task DeletePermanentlyAsync(string path, CancellationToken cancellationToken = default) => Task.Run(() =>
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (File.Exists(path))
+        // The extended path deletes exactly the named item, also when its name ends in a dot or space.
+        var extended = WindowsPaths.ToExtended(path);
+        if (File.Exists(extended))
         {
-            File.Delete(path);
+            File.Delete(extended);
         }
-        else if (Directory.Exists(path))
+        else if (Directory.Exists(extended))
         {
-            Directory.Delete(path, recursive: true);
+            Directory.Delete(extended, recursive: true);
         }
         else
         {
@@ -161,22 +198,30 @@ public sealed class FileOperationService
     // Copies or moves with Explorer's own engine: progress dialog, name-conflict prompts,
     // cross-volume moves and Undo in Explorer all behave exactly as in File Explorer.
     public Task<ShellFileOperationResult> CopyAsync(IReadOnlyList<string> sources, string destinationFolder, nint ownerWindow) =>
-        RunShellFileOperationAsync(FoCopy, sources, destinationFolder, ownerWindow);
+        RunShellFileOperationAsync(FoCopy, sources, destinationFolder, ownerWindow, FofAllowUndo | FofNoConfirmMkdir);
 
     public Task<ShellFileOperationResult> MoveAsync(IReadOnlyList<string> sources, string destinationFolder, nint ownerWindow) =>
-        RunShellFileOperationAsync(FoMove, sources, destinationFolder, ownerWindow);
+        RunShellFileOperationAsync(FoMove, sources, destinationFolder, ownerWindow, FofAllowUndo | FofNoConfirmMkdir);
 
-    private static Task<ShellFileOperationResult> RunShellFileOperationAsync(uint operation, IReadOnlyList<string> sources, string destinationFolder, nint ownerWindow)
+    private static Task<ShellFileOperationResult> RunShellFileOperationAsync(uint operation, IReadOnlyList<string> sources, string? destinationFolder, nint ownerWindow, ushort flags)
     {
         ArgumentNullException.ThrowIfNull(sources);
-        ArgumentException.ThrowIfNullOrWhiteSpace(destinationFolder);
         if (sources.Count == 0)
         {
             return Task.FromResult(new ShellFileOperationResult(0, Aborted: false));
         }
-        if (!Directory.Exists(destinationFolder))
+        // Explorer's engine trims names like the rest of Win32 and would act on a different item.
+        if (sources.FirstOrDefault(WindowsPaths.HasTrimmedSegment) is { } trimmedPath)
         {
-            throw new DirectoryNotFoundException(destinationFolder);
+            throw new IOException($"The name ends with a dot or space, which Windows cannot copy, move or recycle safely: {trimmedPath}");
+        }
+        if (operation != FoDelete)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(destinationFolder);
+            if (!Directory.Exists(destinationFolder))
+            {
+                throw new DirectoryNotFoundException(destinationFolder);
+            }
         }
 
         var completion = new TaskCompletionSource<ShellFileOperationResult>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -192,8 +237,8 @@ public sealed class FileOperationService
                     Function = operation,
                     // Both lists are double-null-terminated; the marshaller adds the final null.
                     From = string.Join('\0', sources.Select(Path.GetFullPath)) + '\0',
-                    To = Path.GetFullPath(destinationFolder) + '\0',
-                    Flags = FofAllowUndo | FofNoConfirmMkdir
+                    To = destinationFolder is null ? null : Path.GetFullPath(destinationFolder) + '\0',
+                    Flags = flags
                 };
                 var error = SHFileOperation(ref fileOperation);
                 completion.TrySetResult(new ShellFileOperationResult(error, fileOperation.AnyOperationsAborted));
@@ -214,6 +259,9 @@ public sealed class FileOperationService
 
     private const uint FoMove = 0x0001;
     private const uint FoCopy = 0x0002;
+    private const uint FoDelete = 0x0003;
+    private const ushort FofNoConfirmation = 0x0010;
+    private const ushort FofWantNukeWarning = 0x4000;
     private const ushort FofNoConfirmMkdir = 0x0200;
     private const ushort FofAllowUndo = 0x0040;
 

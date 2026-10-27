@@ -36,7 +36,16 @@ public partial class App : Application
             throw;
         }
 
-        UnhandledException += (_, args) => WriteCrashLog(args.Exception);
+        UnhandledException += (_, args) =>
+        {
+            WriteCrashLog(args.Exception);
+            // A failing command (a file picker, a dialog) must not close the app and throw away the scan;
+            // once the window is up, the error is shown and the app keeps running.
+            if (Window is MainWindow window && window.TryReportError(args.Exception))
+            {
+                args.Handled = true;
+            }
+        };
         StartupScanPath = ParseScanPath(Environment.GetCommandLineArgs());
     }
 
@@ -140,7 +149,7 @@ public partial class App : Application
 
         var settingsDirectory = GetSettingsDirectory();
         Directory.CreateDirectory(settingsDirectory);
-        File.WriteAllText(Path.Combine(settingsDirectory, "language.txt"), language);
+        DiskLoom.Core.Services.AtomicFile.WriteAllText(Path.Combine(settingsDirectory, "language.txt"), language);
 
         var executablePath = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(executablePath))

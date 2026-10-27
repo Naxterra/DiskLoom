@@ -17,9 +17,12 @@ public sealed class SnapshotService
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
         var snapshot = Create(result);
 
-        await using var file = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024, true);
-        await using var gzip = new GZipStream(file, CompressionLevel.SmallestSize, leaveOpen: false);
-        await JsonSerializer.SerializeAsync(gzip, snapshot, JsonOptions, cancellationToken).ConfigureAwait(false);
+        // Saving over an older snapshot must not destroy it if the write fails or is canceled.
+        await AtomicFile.WriteAsync(destinationPath, async file =>
+        {
+            await using var gzip = new GZipStream(file, CompressionLevel.SmallestSize, leaveOpen: true);
+            await JsonSerializer.SerializeAsync(gzip, snapshot, JsonOptions, cancellationToken).ConfigureAwait(false);
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<ScanSnapshot> LoadAsync(string sourcePath, CancellationToken cancellationToken = default)
