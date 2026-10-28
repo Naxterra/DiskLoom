@@ -100,7 +100,7 @@ public sealed partial class MainPage : Page
         }
 
         var runningVersion = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(0, 1, 0);
-        _ = Task.Run(() => UpdateService.CleanUpdateCache(runningVersion));
+        _ = Task.Run(() => CleanLeftovers(runningVersion));
         _ = CheckForUpdatesAsync(interactive: false);
     }
 
@@ -638,7 +638,7 @@ public sealed partial class MainPage : Page
         }
         catch (Exception exception)
         {
-            ShowNotification(exception.Message, InfoBarSeverity.Error);
+            await ReportFailedRemovalAsync(row.FullPath, exception);
         }
     }
 
@@ -669,8 +669,16 @@ public sealed partial class MainPage : Page
         }
         catch (Exception exception)
         {
-            ShowNotification(exception.Message, InfoBarSeverity.Error);
+            await ReportFailedRemovalAsync(row.FullPath, exception);
         }
+    }
+
+    private async Task ReportFailedRemovalAsync(string path, Exception exception)
+    {
+        var partly = await ApplyPartialRemovalAsync(new[] { path });
+        ShowNotification(
+            partly ? exception.Message + " " + LocalizationService.Get("RemovalPartlyDone") : exception.Message,
+            InfoBarSeverity.Error);
     }
 
     private async Task RefreshAfterTreeDeletionAsync()
@@ -1617,7 +1625,7 @@ public sealed partial class MainPage : Page
 
     private void OpenSelected_Click(object sender, RoutedEventArgs e)
     {
-        if (GetMenuTargets() is [var row])
+        if (GetMenuTargets() is [var row] && !RefuseTrimmedForShell(row.Path))
         {
             try
             {
@@ -1650,7 +1658,7 @@ public sealed partial class MainPage : Page
 
     private void ShowProperties_Click(object sender, RoutedEventArgs e)
     {
-        if (GetMenuTargets() is [var row] && !_fileOperations.ShowProperties(App.WindowHandle, row.Path))
+        if (GetMenuTargets() is [var row] && !RefuseTrimmedForShell(row.Path) && !_fileOperations.ShowProperties(App.WindowHandle, row.Path))
         {
             ShowNotification(LocalizationService.Format("PropertiesFailed", row.Path), InfoBarSeverity.Error);
         }
@@ -1755,28 +1763,38 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        // A duplicate check is a snapshot: refuse to delete a copy whose content may have changed since.
+        // A duplicate check is a snapshot: refuse to delete a copy whose content may have changed since, and keep
+        // at least one intact copy of each file, also after "Select all" or when another program removed the rest.
         var duplicates = rows.OfType<DuplicateRow>().ToArray();
-        var changed = duplicates.Count(static row => !DuplicateFinder.IsUnchanged(row.File));
-        if (changed > 0)
+        bool DuplicatesStillSafe()
         {
-            ShowNotification(LocalizationService.Format("DuplicateChangedSinceCheck", changed), InfoBarSeverity.Warning);
-            return;
+            var changed = duplicates.Count(static row => !DuplicateFinder.IsUnchanged(row.File));
+            if (changed > 0)
+            {
+                ShowNotification(LocalizationService.Format("DuplicateChangedSinceCheck", changed), InfoBarSeverity.Warning);
+                return false;
+            }
+
+            if (duplicates.Length > 0)
+            {
+                var listed = (DuplicatesList.ItemsSource as IEnumerable<DuplicateRow> ?? []).ToArray();
+                var losing = DuplicateFinder.GroupsLosingEveryCopy(
+                    duplicates.Select(static row => row.Group).Distinct(),
+                    listed.Select(static row => row.Path),
+                    duplicates.Select(static row => row.Path));
+                if (losing.Count > 0)
+                {
+                    ShowNotification(LocalizationService.Format("DuplicateKeepOneCopy", losing.Count), InfoBarSeverity.Warning);
+                    return false;
+                }
+            }
+
+            return true;
         }
 
-        // Deleting duplicates must keep at least one copy of each file, also after "Select all".
-        if (duplicates.Length > 0)
+        if (!DuplicatesStillSafe())
         {
-            var listed = (DuplicatesList.ItemsSource as IEnumerable<DuplicateRow> ?? []).ToArray();
-            var losing = DuplicateFinder.GroupsLosingEveryCopy(
-                duplicates.Select(static row => row.Group).Distinct(),
-                listed.Select(static row => row.Path),
-                duplicates.Select(static row => row.Path));
-            if (losing.Count > 0)
-            {
-                ShowNotification(LocalizationService.Format("DuplicateKeepOneCopy", losing.Count), InfoBarSeverity.Warning);
-                return;
-            }
+            return;
         }
 
         var subject = (rows.Count == 1 ? rows[0].Path : LocalizationService.Format("MultipleItemsSummary", rows.Count)) +
@@ -1799,8 +1817,15 @@ public sealed partial class MainPage : Page
             return;
         }
 
+        // The dialog may have been open for a while, so check again what it confirmed.
+        if (!DuplicatesStillSafe())
+        {
+            return;
+        }
+
         var failures = 0;
         var removed = new List<string>();
+        var failed = new List<string>();
         foreach (var row in rows)
         {
             try
@@ -1818,14 +1843,17 @@ public sealed partial class MainPage : Page
             catch
             {
                 failures++;
+                failed.Add(row.Path);
             }
         }
 
         await ApplyRemovedPathsAsync(removed);
+        var partly = await ApplyPartialRemovalAsync(failed);
         if (failures > 0)
         {
             ShowNotification(
-                LocalizationService.Format(permanently ? "DeleteFailedSummary" : "RecycleFailedSummary", failures, rows.Count),
+                LocalizationService.Format(permanently ? "DeleteFailedSummary" : "RecycleFailedSummary", failures, rows.Count) +
+                (partly ? " " + LocalizationService.Get("RemovalPartlyDone") : string.Empty),
                 permanently ? InfoBarSeverity.Error : InfoBarSeverity.Warning);
         }
         else
@@ -1854,8 +1882,9 @@ public sealed partial class MainPage : Page
             }
 
             var currentVersion = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(0, 1, 0);
-            var result = await _updateService.CheckAsync(configuration, currentVersion, preferredLanguage: App.CurrentLanguage);
+            // Recorded before the request, so an offline or rate-limited check is not repeated at every start.
             RecordUpdateCheck();
+            var result = await _updateService.CheckAsync(configuration, currentVersion, preferredLanguage: App.CurrentLanguage);
             if (!result.IsConfigured)
             {
                 if (interactive)

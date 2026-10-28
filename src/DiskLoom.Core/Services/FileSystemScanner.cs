@@ -46,7 +46,7 @@ public sealed class FileSystemScanner
         var visitedTargets = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
         var physicalFiles = new ConcurrentDictionary<FileIdentity, ScanNode>();
         var sharedFiles = new ConcurrentBag<ScanNode>();
-        visitedTargets.TryAdd(normalizedPath, 0);
+        visitedTargets.TryAdd(DirectoryKey(normalizedPath, options.FollowReparsePoints) ?? normalizedPath, 0);
         var rootListed = 0;
         var liveProgress = progress is null
             ? null
@@ -170,7 +170,7 @@ public sealed class FileSystemScanner
                                 // Cloud Files placeholders are part of the visible folder namespace,
                                 // not links to another location. Listing them never reads file contents,
                                 // though the sync client may fetch the folder listing itself.
-                                if (!visitedTargets.TryAdd(Path.GetFullPath(entry.FullPath), 0))
+                                if (!visitedTargets.TryAdd(DirectoryKey(entry.FullPath, options.FollowReparsePoints) ?? entry.FullPath, 0))
                                 {
                                     continue;
                                 }
@@ -182,14 +182,14 @@ public sealed class FileSystemScanner
                                     continue;
                                 }
 
-                                var target = new DirectoryInfo(entry.FullPath).ResolveLinkTarget(returnFinalTarget: true)?.FullName;
-                                if (string.IsNullOrWhiteSpace(target) || !visitedTargets.TryAdd(Path.GetFullPath(target), 0))
+                                // A broken link has no identity and is not followed.
+                                if (DirectoryKey(entry.FullPath, byIdentity: true) is not { } target || !visitedTargets.TryAdd(target, 0))
                                 {
                                     continue;
                                 }
                             }
                         }
-                        else if (options.FollowReparsePoints && !visitedTargets.TryAdd(Path.GetFullPath(entry.FullPath), 0))
+                        else if (options.FollowReparsePoints && !visitedTargets.TryAdd(DirectoryKey(entry.FullPath, byIdentity: true) ?? entry.FullPath, 0))
                         {
                             // A previously followed reparse point already claimed this physical
                             // directory under a different path; skip the duplicate so its contents
@@ -443,6 +443,19 @@ public sealed class FileSystemScanner
     }
 
     // Adds a fresh top-level snapshot to at most ~2 progress reports per second.
+    // With links followed, one directory can be reached under several paths (a link to a folder and a link to its
+    // parent, for example), so directories are identified by volume and file ID. Without links, paths are unique.
+    private static string? DirectoryKey(string path, bool byIdentity)
+    {
+        if (!byIdentity)
+        {
+            return path;
+        }
+        return FileState.ReadIdentity(WindowsPaths.ToExtended(path)) is { } identity
+            ? $"ID:{identity.VolumeSerialNumber:X8}:{identity.FileId:X16}"
+            : null;
+    }
+
     private sealed class LiveScanProgress(IProgress<ScanProgress> inner, Func<bool> isReady, Func<IReadOnlyList<ScanNode>> snapshot) : IProgress<ScanProgress>
     {
         private long _lastSnapshotTick;

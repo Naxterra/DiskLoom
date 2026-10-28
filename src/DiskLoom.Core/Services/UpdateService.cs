@@ -211,28 +211,42 @@ public sealed class UpdateService(HttpClient? httpClient = null)
         "DiskLoom",
         "Updates");
 
-    // Removes downloaded installers for this version and older ones (they are only needed until they have run),
-    // including partial downloads left by an interrupted update.
-    public static void CleanUpdateCache(Version currentVersion, string? cacheFolder = null)
+    // Removes what updates leave behind: installers of this and older versions (they have run), partial downloads,
+    // and folders of newer versions whose installer is gone or more than a day old, which is what a failed or
+    // declined install leaves. Only a complete installer of a newer version from the last day is kept, because
+    // Windows Installer may still be using it.
+    public static void CleanUpdateCache(Version currentVersion, string? cacheFolder = null, DateTime? nowUtc = null)
     {
         var folder = cacheFolder ?? UpdateCacheFolder;
         if (!Directory.Exists(folder))
         {
             return;
         }
+        var now = nowUtc ?? DateTime.UtcNow;
         foreach (var versionFolder in Directory.EnumerateDirectories(folder))
         {
-            if (Version.TryParse(Path.GetFileName(versionFolder), out var version) &&
-                (version < currentVersion || SameVersion(version, currentVersion)))
+            if (!Version.TryParse(Path.GetFileName(versionFolder), out var version))
             {
-                try
+                continue;
+            }
+            try
+            {
+                foreach (var partial in Directory.EnumerateFiles(versionFolder, "*.download.*"))
+                {
+                    File.Delete(partial);
+                }
+                var newer = !(version < currentVersion || SameVersion(version, currentVersion));
+                var keep = newer && Directory.EnumerateFiles(versionFolder).Any(file =>
+                    Path.GetExtension(file).ToLowerInvariant() is ".msi" or ".exe" &&
+                    now - File.GetLastWriteTimeUtc(file) < TimeSpan.FromDays(1));
+                if (!keep)
                 {
                     Directory.Delete(versionFolder, recursive: true);
                 }
-                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-                {
-                    // An installer still running from there keeps its files; the next start retries.
-                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                // An installer still running from there keeps its files; the next start retries.
             }
         }
     }
@@ -369,6 +383,8 @@ public sealed class UpdateService(HttpClient? httpClient = null)
         {
             var log = Path.Combine(Path.GetDirectoryName(installerPath)!, "install.log");
             var install = $"start \"\" /wait msiexec.exe /i \"{installerPath}\" /passive /norestart /l*v \"{log}\"";
+            // The installer is not needed once Windows Installer has finished, whether it succeeded or not.
+            install += $" & del /f /q \"{installerPath}\"";
             var command = string.IsNullOrWhiteSpace(relaunchPath) ? install : $"{install} & start \"\" \"{relaunchPath}\"";
             return Process.Start(new ProcessStartInfo("cmd.exe", $"/d /c {command}")
             {

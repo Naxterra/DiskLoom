@@ -772,6 +772,7 @@ public sealed partial class MainPage
         {
             return;
         }
+        ForgetOtherCachedScans(paths);
 
         // The scanned folder itself is gone: scan its parent instead (this takes the lock itself).
         if (_basePresentation is { } current && paths.Any(path => PathsEqual(path, current.Result.Root.FullPath)))
@@ -888,6 +889,48 @@ public sealed partial class MainPage
         }
     }
 
+    // Cached scans other than the current one would still show removed items, for example a cached D:\ after a
+    // deletion in a scan of D:\Photos, so such scans are forgotten and scanned again when they are picked.
+    private void ForgetOtherCachedScans(IReadOnlyList<string> removedPaths)
+    {
+        var stale = _scanCache
+            .Where(entry => !ReferenceEquals(entry.Value, _basePresentation) &&
+                            removedPaths.Any(path => IsSameOrInside(path, entry.Value.Result.Root.FullPath) ||
+                                                     IsSameOrInside(entry.Value.Result.Root.FullPath, path)))
+            .Select(static entry => entry.Key)
+            .ToArray();
+        foreach (var key in stale)
+        {
+            _scanCache.Remove(key);
+            _scanCacheOrder.RemoveAll(entry => entry.Equals(key, StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    // A delete or recycle that failed may already have removed part of a folder. The scan drops what is gone, so
+    // its totals match the disk. Returns whether anything had been removed.
+    private async Task<bool> ApplyPartialRemovalAsync(IReadOnlyList<string> failedPaths)
+    {
+        if (failedPaths.Count == 0 || CurrentScanRoot is not { } root)
+        {
+            return false;
+        }
+
+        try
+        {
+            var vanished = await ReadScanAsync(() => failedPaths.SelectMany(path => ScanTreeEditor.FindVanished(root, path)).ToArray());
+            if (vanished.Length == 0)
+            {
+                return false;
+            }
+            await ApplyRemovedPathsAsync(vanished);
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     internal void ReportUnexpectedError(Exception exception)
     {
         EndSideTask();
@@ -904,6 +947,17 @@ public sealed partial class MainPage
             return false;
         }
         ShowNotification(LocalizationService.Format("TrimmedNameRefused", trimmed), InfoBarSeverity.Warning);
+        return true;
+    }
+
+    // The shell would open or describe the twin of a name ending in a dot or space.
+    private bool RefuseTrimmedForShell(string path)
+    {
+        if (!WindowsPaths.HasTrimmedSegment(path))
+        {
+            return false;
+        }
+        ShowNotification(LocalizationService.Format("TrimmedNameNotOpened", path), InfoBarSeverity.Warning);
         return true;
     }
 
@@ -1227,6 +1281,18 @@ public sealed partial class MainPage
         await _scanEditLock.WaitAsync();
         try
         {
+            // A deletion or move may have changed the scan while the dialogs were open, so export its current state.
+            if (!ReferenceEquals(_scanResult, result) && _scanResult is { } current && PathsEqual(current.Root.FullPath, result.Root.FullPath))
+            {
+                if (ScanTreeEditor.Find(current.Root, root.FullPath) is not { } currentRoot)
+                {
+                    ShowNotification(LocalizationService.Format("ExportFolderRemoved", root.FullPath), InfoBarSeverity.Warning);
+                    return;
+                }
+                result = current;
+                root = currentRoot;
+            }
+
             // A sub-folder export needs its own type statistics.
             var exported = ReferenceEquals(root, result.Root)
                 ? result
@@ -1249,15 +1315,20 @@ public sealed partial class MainPage
                     summary = await new ReportExportService().ExportHtmlAsync(exported, path, options, text, culture);
                     break;
                 case ExportFormat.Pdf:
-                    var htmlPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"DiskLoom-report-{Guid.NewGuid():N}.html");
+                    var htmlPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{PdfReportPrefix}{Guid.NewGuid():N}.html");
+                    // WebView2 writes the PDF itself, so it prints to a temporary file that replaces an existing
+                    // PDF only once it is complete.
+                    var pdfTemporary = AtomicFile.TemporaryPathFor(System.IO.Path.GetFullPath(path));
                     try
                     {
                         summary = await new ReportExportService().ExportHtmlAsync(exported, htmlPath, options, text, culture);
-                        await PdfReportPrinter.PrintAsync(htmlPath, path, $"{text.Title} – {root.FullPath}", App.WindowHandle);
+                        await PdfReportPrinter.PrintAsync(htmlPath, pdfTemporary, $"{text.Title} – {root.FullPath}", App.WindowHandle);
+                        AtomicFile.Replace(pdfTemporary, path);
                     }
                     finally
                     {
                         TryDeleteFile(htmlPath);
+                        TryDeleteFile(pdfTemporary);
                     }
                     break;
                 default:
@@ -1315,6 +1386,30 @@ public sealed partial class MainPage
         DepthAll = LocalizationService.Get("ExportAllLevels"),
         Depth = LocalizationService.Get("ReportDepth")
     };
+
+    private const string PdfReportPrefix = "DiskLoom-report-";
+
+    // Removes what an update, a killed write or a killed PDF export left behind: installers that have run,
+    // temporary settings files and the HTML that a PDF export renders from.
+    private static void CleanLeftovers(Version runningVersion)
+    {
+        try
+        {
+            UpdateService.CleanUpdateCache(runningVersion);
+            AtomicFile.SweepStale(System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DiskLoom"));
+            foreach (var report in Directory.EnumerateFiles(System.IO.Path.GetTempPath(), PdfReportPrefix + "*.html"))
+            {
+                if (DateTime.UtcNow - File.GetLastWriteTimeUtc(report) > TimeSpan.FromHours(1))
+                {
+                    TryDeleteFile(report);
+                }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Leftovers are harmless, and the next start tries again.
+        }
+    }
 
     private static void TryDeleteFile(string path)
     {

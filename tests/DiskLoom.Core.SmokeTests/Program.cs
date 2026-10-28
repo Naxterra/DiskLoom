@@ -95,6 +95,30 @@ try
         Require(ScanPaths.Normalize("C:") == @"C:\" && ScanPaths.Normalize("C:\"") == @"C:\" && ScanPaths.Normalize(@"""C:\Windows""") == @"C:\Windows",
             "Drive letters without a separator must normalize to the drive root."));
 
+    Test("followed_links_never_count_a_folder_twice", "With links followed, a link to a folder, a link to its parent and a link back to the scan root count the one file once.", async () =>
+    {
+        var links = Path.Combine(testRoot, "Junctions");
+        var docs = Directory.CreateDirectory(Path.Combine(links, "Outside", "X", "Docs")).FullName;
+        await File.WriteAllBytesAsync(Path.Combine(docs, "f.bin"), new byte[1024]);
+        var scanRoot = Directory.CreateDirectory(Path.Combine(links, "Scan")).FullName;
+        CreateJunction(Path.Combine(scanRoot, "J"), docs);
+        CreateJunction(Path.Combine(scanRoot, "K"), Path.Combine(links, "Outside", "X"));
+        CreateJunction(Path.Combine(scanRoot, "Loop"), scanRoot);
+        var followed = await scanner.ScanAsync(scanRoot, new ScanOptions { Parallelism = 4, FollowReparsePoints = true });
+        Require(followed.Root.FileCount == 1 && followed.Root.Size == 1024, $"Expected one file of 1024 bytes, found {followed.Root.FileCount} files of {followed.Root.Size} bytes.");
+    });
+    Test("drive_and_volume_roots_are_refused_by_file_operations", "Deleting, recycling or moving a drive root is refused before anything happens, and ordinary folders are not mistaken for volume roots.", async () =>
+    {
+        var systemRoot = Path.GetPathRoot(testRoot)!;
+        Require(WindowsPaths.IsVolumeRoot(systemRoot) && WindowsPaths.IsVolumeRoot(systemRoot.TrimEnd('\\')) && WindowsPaths.IsVolumeRoot(@"\\?\" + systemRoot), "A drive root must be recognised in every spelling.");
+        Require(!WindowsPaths.IsVolumeRoot(testRoot) && !WindowsPaths.IsVolumeRoot(firstDirectory.FullName), "Ordinary folders are not volume roots.");
+        // An unused drive letter, so a missing refusal fails with "not found" instead of touching a real drive.
+        var unused = "QRSTUVWXYZ".Select(static letter => $"{letter}:\\").First(static root => !Directory.Exists(root));
+        await RequireThrowsAsync<InvalidOperationException>(() => fileOperations.DeletePermanentlyAsync(unused));
+        await RequireThrowsAsync<InvalidOperationException>(() => fileOperations.RecycleAsync(unused));
+        await RequireThrowsAsync<InvalidOperationException>(() => fileOperations.MoveAsync([unused], testRoot, 0));
+    });
+
     // ---- Names ending in a dot or space (Windows would trim them to a different item) ---------
 
     var trimmedRoot = Directory.CreateDirectory(Path.Combine(testRoot, "Trimmed")).FullName;
@@ -222,10 +246,27 @@ try
         var remaining = new[] { @"C:\d\a.bin", @"C:\d\b.bin" };
         Require(DuplicateFinder.GroupsLosingEveryCopy([group], remaining, [@"C:\d\a.bin", @"C:\d\b.bin"]).Count == 1, "Deleting both remaining copies must be flagged.");
     });
-    TestSync("deleting_some_copies_of_a_duplicate_group_is_allowed", "Deleting one of two remaining copies is not flagged.", () =>
+    Test("deleting_some_copies_of_a_duplicate_group_is_allowed", "Deleting one of two copies that are both still on disk and unchanged is not flagged.", async () =>
     {
-        var group = new DuplicateGroup("hash", 10, [new DuplicateFile(@"C:\d\a.bin", 10, default), new DuplicateFile(@"C:\d\b.bin", 10, default)]);
-        Require(DuplicateFinder.GroupsLosingEveryCopy([group], [@"C:\d\a.bin", @"C:\d\b.bin"], [@"C:\d\a.bin"]).Count == 0, "Deleting one copy must be allowed.");
+        var group = await DuplicatePairAsync("KeepOne");
+        Require(DuplicateFinder.GroupsLosingEveryCopy([group], group.Files.Select(static file => file.Path), [group.Files[0].Path]).Count == 0, "Deleting one copy must be allowed.");
+    });
+    Test("deleting_last_copy_after_other_copy_vanished_is_refused", "When another program deleted one copy after the check, deleting the other, still listed copy is flagged.", async () =>
+    {
+        var group = await DuplicatePairAsync("Vanished");
+        File.Delete(group.Files[1].Path);
+        Require(DuplicateFinder.GroupsLosingEveryCopy([group], group.Files.Select(static file => file.Path), [group.Files[0].Path]).Count == 1, "Deleting the last copy on disk must be flagged.");
+    });
+    Test("duplicate_rewritten_with_same_size_and_date_counts_as_changed", "A copy overwritten with other content of the same size, with its modification time set back, no longer counts as unchanged.", async () =>
+    {
+        var group = await DuplicatePairAsync("Rewritten");
+        var rewritten = group.Files[0];
+        await File.WriteAllBytesAsync(rewritten.Path, duplicateBytes.Reverse().ToArray());
+        File.SetLastWriteTimeUtc(rewritten.Path, rewritten.LastWriteUtc.UtcDateTime);
+        Require(new FileInfo(rewritten.Path).Length == rewritten.Size && File.GetLastWriteTimeUtc(rewritten.Path) == rewritten.LastWriteUtc.UtcDateTime, "The fixture must keep size and date.");
+        Require(!DuplicateFinder.IsUnchanged(rewritten), "A rewritten copy must count as changed.");
+        Require(DuplicateFinder.IsUnchanged(group.Files[1]), "The untouched copy must still count as unchanged.");
+        Require(DuplicateFinder.GroupsLosingEveryCopy([group], group.Files.Select(static file => file.Path), [group.Files[1].Path]).Count == 1, "Deleting the only intact copy must be flagged.");
     });
 
     // ---- Snapshots -------------------------------------------------------------------------------------
@@ -271,7 +312,7 @@ try
         }
         await RequireThrowsAsync<InvalidDataException>(() => snapshotService.LoadAsync(legacySnapshotPath));
     });
-    Test("snapshot_save_canceled_midway_keeps_previous_snapshot", "Saving over an existing snapshot with a canceled token leaves the old file intact and no temporary file behind.", async () =>
+    Test("snapshot_save_canceled_before_writing_keeps_previous_snapshot", "Saving over an existing snapshot with a canceled token leaves the old file intact and no temporary file behind.", async () =>
     {
         var path = Path.Combine(testRoot, "keep.diskloom");
         await snapshotService.SaveAsync(result, path);
@@ -294,7 +335,7 @@ try
         Require(File.ReadAllText(csvPath).Contains("unique.txt", StringComparison.Ordinal), "CSV export is missing a file.");
         Require(File.ReadAllText(jsonPath).Contains("unique.txt", StringComparison.Ordinal), "JSON export is missing a file.");
     });
-    Test("export_canceled_midway_original_file_unchanged", "A CSV export over an existing file that is canceled leaves the old file intact and no temporary file behind.", async () =>
+    Test("export_canceled_before_writing_original_file_unchanged", "A CSV export over an existing file that is canceled leaves the old file intact and no temporary file behind.", async () =>
     {
         var path = Path.Combine(testRoot, "existing.csv");
         await File.WriteAllTextAsync(path, "original content");
@@ -358,6 +399,43 @@ try
         var deepJsonPath = Path.Combine(testRoot, "deep.json");
         await exporter.ExportJsonAsync(new ScanResult(deepRoot, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, [], [], []), deepJsonPath);
         Require(File.ReadAllText(deepJsonPath).Contains("\"d59\"", StringComparison.Ordinal), "JSON export must handle deeply nested folders.");
+    });
+
+    Test("atomic_write_failing_midway_keeps_original_file", "A write that fails after half of the data keeps the old file, and its temporary file is hidden while written and removed afterwards.", async () =>
+    {
+        var path = Path.Combine(testRoot, "midway.txt");
+        await File.WriteAllTextAsync(path, "original content");
+        await RequireThrowsAsync<IOException>(() => AtomicFile.WriteAsync(path, async stream =>
+        {
+            await stream.WriteAsync(new byte[4096]);
+            var temporary = Directory.EnumerateFiles(testRoot, ".midway.txt.*.tmp").Single();
+            Require(File.GetAttributes(temporary).HasFlag(FileAttributes.Hidden), "The temporary file must be hidden while it is written.");
+            throw new IOException("The disk is full.");
+        }));
+        Require(File.ReadAllText(path) == "original content", "The original file must be unchanged.");
+        Require(!Directory.EnumerateFiles(testRoot, ".midway.txt.*.tmp").Any(), "No temporary file may be left behind.");
+    });
+    TestSync("finished_atomic_write_is_complete_and_visible", "A settings file written atomically has the new content and is not hidden.", () =>
+    {
+        var path = Path.Combine(testRoot, "settings.json");
+        File.WriteAllText(path, "old");
+        AtomicFile.WriteAllText(path, "new");
+        Require(File.ReadAllText(path) == "new" && !File.GetAttributes(path).HasFlag(FileAttributes.Hidden), "The written file must be complete and visible.");
+    });
+    TestSync("stale_temporary_files_are_swept_after_an_hour", "Temporary files left by a killed write are removed once older than an hour, while fresh ones and other files stay.", () =>
+    {
+        var folder = Directory.CreateDirectory(Path.Combine(testRoot, "Sweep")).FullName;
+        var stale = Path.Combine(folder, $".columns.json.{Guid.NewGuid():N}.tmp");
+        var fresh = Path.Combine(folder, $".columns.json.{Guid.NewGuid():N}.tmp");
+        var other = Path.Combine(folder, ".notes.tmp");
+        foreach (var file in new[] { stale, fresh, other })
+        {
+            File.WriteAllText(file, "x");
+        }
+        File.SetLastWriteTimeUtc(stale, DateTime.UtcNow.AddHours(-2));
+        File.SetLastWriteTimeUtc(other, DateTime.UtcNow.AddHours(-2));
+        AtomicFile.SweepStale(folder);
+        Require(!File.Exists(stale) && File.Exists(fresh) && File.Exists(other), "Only the stale temporary file may be removed.");
     });
 
     // ---- Copy and move ---------------------------------------------------------------------------------
@@ -437,6 +515,25 @@ try
         var folderGone = ScanTreeEditor.RemovePaths(edited, [Path.Combine(linkRoot, "src")], DateTimeOffset.UtcNow);
         Require(folderGone.Root.Size == beforeSize - (2 << 20) && folderGone.Root.FolderCount == 8 && folderGone.Extensions.Single().FileCount == 7, "Removing a folder must update totals, counts and statistics.");
         Require(!snapshotService.Create(folderGone).Entries.Any(static entry => entry.RelativePath.StartsWith("src", StringComparison.OrdinalIgnoreCase)), "Snapshots of an edited scan must not contain removed items.");
+    });
+
+    Test("failed_folder_delete_drops_exactly_the_removed_files", "When deleting a folder fails because one file is open, the scan drops the four files already deleted and keeps counting the open one.", async () =>
+    {
+        var partialRoot = Directory.CreateDirectory(Path.Combine(testRoot, "Partial")).FullName;
+        var victim = Directory.CreateDirectory(Path.Combine(partialRoot, "Victim")).FullName;
+        foreach (var index in Enumerable.Range(1, 5))
+        {
+            await File.WriteAllBytesAsync(Path.Combine(victim, $"f{index}.bin"), new byte[1000 * index]);
+        }
+        var partialScan = await scanner.ScanAsync(partialRoot);
+        using (new FileStream(Path.Combine(victim, "f3.bin"), FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            await RequireThrowsAsync<IOException>(() => fileOperations.DeletePermanentlyAsync(victim));
+        }
+        var vanished = ScanTreeEditor.FindVanished(partialScan.Root, victim);
+        Require(vanished.Count == 4 && !vanished.Any(static path => path.EndsWith("f3.bin", StringComparison.OrdinalIgnoreCase)), $"Expected the four deleted files, found {vanished.Count}.");
+        var updated = ScanTreeEditor.RemovePaths(partialScan, vanished, DateTimeOffset.UtcNow);
+        Require(updated.Root.FileCount == 1 && updated.Root.Size == 3000, "The scan must keep only the file that is still there.");
     });
 
     // ---- Updates -------------------------------------------------------------------------------------------
@@ -531,17 +628,39 @@ try
         var check = await new UpdateService(noReleaseClient).CheckAsync(repositoryConfiguration, new Version(0, 1, 4));
         Require(check.IsConfigured && !check.IsUpdateAvailable, "A repository without releases should be a successful no-update result.");
     });
-    TestSync("update_cache_cleanup_keeps_only_newer_versions", "Cleaning the update cache removes the folders of the running and older versions and keeps a newer one.", () =>
+    TestSync("update_cache_keeps_only_a_recent_newer_installer", "Cleaning the update cache removes installers that have run, partial downloads, logs of failed installs and newer installers older than a day.", () =>
     {
         var cache = Directory.CreateDirectory(Path.Combine(testRoot, "Updates")).FullName;
-        foreach (var version in new[] { "0.1.20", "0.1.25", "0.1.30" })
+        void Put(string version, string name, DateTime? written = null)
         {
-            Directory.CreateDirectory(Path.Combine(cache, version));
-            File.WriteAllText(Path.Combine(cache, version, "DiskLoom.download.msi"), "partial");
+            var file = Path.Combine(Directory.CreateDirectory(Path.Combine(cache, version)).FullName, name);
+            File.WriteAllText(file, "installer");
+            if (written is { } time)
+            {
+                File.SetLastWriteTimeUtc(file, time);
+            }
         }
+        Put("0.1.20", "DiskLoom-0.1.20.msi");
+        Put("0.1.25", "DiskLoom-0.1.25.msi");
+        Put("0.1.30", "DiskLoom-0.1.30.msi");
+        Put("0.1.30", "DiskLoom-0.1.30.download.msi");
+        Put("0.1.31", "install.log");
+        Put("0.1.32", "DiskLoom-0.1.32.msi", DateTime.UtcNow.AddDays(-2));
         UpdateService.CleanUpdateCache(new Version(0, 1, 25), cache);
-        Require(Directory.EnumerateDirectories(cache).Select(Path.GetFileName).SequenceEqual(["0.1.30"]), "Only the newer version may remain.");
+        Require(Directory.EnumerateDirectories(cache).Select(Path.GetFileName).SequenceEqual(["0.1.30"]), "Only the recent newer version may remain.");
+        Require(Directory.EnumerateFiles(Path.Combine(cache, "0.1.30")).Select(Path.GetFileName).SequenceEqual(["DiskLoom-0.1.30.msi"]), "The partial download must be removed.");
     });
+
+    // Two identical files in their own folder, scanned and checked, as the duplicate list would show them.
+    async Task<DuplicateGroup> DuplicatePairAsync(string folderName)
+    {
+        var folder = Directory.CreateDirectory(Path.Combine(testRoot, folderName)).FullName;
+        await File.WriteAllBytesAsync(Path.Combine(folder, "a.bin"), duplicateBytes);
+        await File.WriteAllBytesAsync(Path.Combine(folder, "b.bin"), duplicateBytes);
+        var found = await new DuplicateFinder().FindAsync((await scanner.ScanAsync(folder)).Root, minimumFileSize: 1);
+        Require(found.Groups.Count == 1 && found.Groups[0].Files.Count == 2, "The duplicate fixture must form one group of two.");
+        return found.Groups[0];
+    }
 
     // ---- Run --------------------------------------------------------------------------------------------------
 
@@ -568,6 +687,24 @@ finally
     {
         Directory.Delete(WindowsPaths.ToExtended(testRoot), recursive: true);
     }
+    var parent = Path.GetDirectoryName(testRoot)!;
+    if (Directory.Exists(parent) && !Directory.EnumerateFileSystemEntries(parent).Any())
+    {
+        Directory.Delete(parent);
+    }
+}
+
+static void CreateJunction(string link, string target)
+{
+    using var mklink = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/d /c mklink /J \"{link}\" \"{target}\"")
+    {
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true
+    })!;
+    mklink.StandardOutput.ReadToEnd();
+    mklink.WaitForExit();
+    Require(mklink.ExitCode == 0 && Directory.Exists(link), $"Could not create the junction {link}.");
 }
 
 static void Require(bool condition, string message)

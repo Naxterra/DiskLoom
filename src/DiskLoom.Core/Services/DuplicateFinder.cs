@@ -14,8 +14,9 @@ public sealed class DuplicateFinder
 
     public static bool IsCloudOnly(ScanNode file) => (file.Attributes & CloudOnlyAttributes) != 0;
 
-    // Groups in which every copy that still exists is among the paths about to be deleted. Deleting duplicates must
-    // keep at least one copy, so a selection like "select all, delete" is refused for these groups.
+    // Groups that would lose their last copy: a copy is about to be deleted, and no other copy is still listed, still
+    // on disk and unchanged since the check. Deleting duplicates must keep at least one intact copy, so a selection
+    // like "select all, delete" is refused, and so is deleting the last copy after another program removed the rest.
     public static IReadOnlyList<DuplicateGroup> GroupsLosingEveryCopy(
         IEnumerable<DuplicateGroup> groups,
         IEnumerable<string> remainingPaths,
@@ -25,10 +26,8 @@ public sealed class DuplicateFinder
         var deleting = deletingPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
         return groups
             .Where(group =>
-            {
-                var left = group.Files.Select(static file => file.Path).Where(remaining.Contains).ToArray();
-                return left.Length > 0 && left.All(deleting.Contains);
-            })
+                group.Files.Any(file => deleting.Contains(file.Path)) &&
+                !group.Files.Any(file => remaining.Contains(file.Path) && !deleting.Contains(file.Path) && IsUnchanged(file)))
             .ToArray();
     }
 
@@ -108,7 +107,7 @@ public sealed class DuplicateFinder
             .SelectMany(static group => group.Select(static item => item.File))
             .ToArray();
 
-        var fullHashes = new ConcurrentBag<(ScanNode File, string Hash)>();
+        var fullHashes = new ConcurrentBag<(ScanNode File, string Hash, DateTime? ChangeUtc)>();
         processed = 0;
         await Parallel.ForEachAsync(
             fullCandidates,
@@ -132,7 +131,7 @@ public sealed class DuplicateFinder
                     var hash = await SHA256.HashDataAsync(stream, token).ConfigureAwait(false);
                     // The share mode allows writers, so make sure nothing changed while hashing.
                     EnsureUnchanged(stream, file);
-                    fullHashes.Add((file, Convert.ToHexString(hash)));
+                    fullHashes.Add((file, Convert.ToHexString(hash), FileState.Read(stream.SafeFileHandle)?.ChangeUtc));
                 }
                 catch (FileChangedException exception)
                 {
@@ -154,7 +153,7 @@ public sealed class DuplicateFinder
             .Select(group => new DuplicateGroup(
                 group.Key.Hash,
                 group.Key.Size,
-                group.Select(static item => new DuplicateFile(item.File.FullPath, item.File.Size, item.File.LastWriteUtc))
+                group.Select(static item => new DuplicateFile(item.File.FullPath, item.File.Size, item.File.LastWriteUtc, item.ChangeUtc))
                     .OrderBy(static file => file.Path, StringComparer.OrdinalIgnoreCase)
                     .ToArray()))
             .OrderByDescending(static group => group.ReclaimableSize)
@@ -176,20 +175,14 @@ public sealed class DuplicateFinder
         }
     }
 
-    // True when the file still has the size and modification time a duplicate check reported,
-    // so a later delete acts on the same content the user reviewed.
-    public static bool IsUnchanged(DuplicateFile file)
-    {
-        try
-        {
-            var info = new FileInfo(WindowsPaths.ToExtended(file.Path));
-            return info.Exists && info.Length == file.Size && info.LastWriteTimeUtc == file.LastWriteUtc.UtcDateTime;
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            return false;
-        }
-    }
+    // True when the file still has the size, modification time and change time the duplicate check recorded, so a
+    // later delete acts on the same content the user reviewed. The change time also catches a file rewritten with
+    // the same size whose modification time was set back, as some copy and sync tools do.
+    public static bool IsUnchanged(DuplicateFile file) =>
+        FileState.Read(WindowsPaths.ToExtended(file.Path)) is { IsDirectory: false, DeletePending: false } current &&
+        current.Size == file.Size &&
+        current.LastWriteUtc == file.LastWriteUtc.UtcDateTime &&
+        (file.ChangeUtc is null || current.ChangeUtc == file.ChangeUtc);
 
     private sealed class FileChangedException(string path)
         : IOException($"The file changed after the scan and was skipped; rescan to include it: {path}");

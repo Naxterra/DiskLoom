@@ -123,6 +123,35 @@ public static class ScanTreeEditor
         }
     }
 
+    // The topmost items at or below this path that are no longer on disk. A folder delete that fails partway has
+    // already removed some files, and the scan must drop exactly those and keep counting what is left.
+    public static IReadOnlyList<string> FindVanished(ScanNode root, string path)
+    {
+        var vanished = new List<string>();
+        if (Find(root, path) is not { } start)
+        {
+            return vanished;
+        }
+
+        var stack = new Stack<ScanNode>();
+        stack.Push(start);
+        while (stack.TryPop(out var node))
+        {
+            var extended = WindowsPaths.ToExtended(node.FullPath);
+            if (!(node.IsDirectory ? Directory.Exists(extended) : File.Exists(extended)))
+            {
+                vanished.Add(node.FullPath);
+                continue;
+            }
+
+            foreach (var child in node.Children)
+            {
+                stack.Push(child);
+            }
+        }
+        return vanished;
+    }
+
     // Single-threaded convenience for callers without a UI.
     public static ScanResult RemovePaths(ScanResult result, IEnumerable<string> paths, DateTimeOffset now)
     {

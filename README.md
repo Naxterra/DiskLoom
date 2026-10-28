@@ -11,9 +11,9 @@ DiskLoom is a clean-room Windows 11 storage analyzer built with C#, .NET 11, Win
 
 ## Install
 
-Download the x64 MSI or portable ZIP from [GitHub Releases](https://github.com/Naxterra/DiskLoom/releases/latest). Releases include English and fully localized German MSI variants. Both offer optional Start-menu and Desktop shortcuts and Windows Explorer folder/drive integration.
+Download the English or German x64 MSI or the portable ZIP from [GitHub Releases](https://github.com/Naxterra/DiskLoom/releases/latest). Both MSIs offer optional Start-menu and Desktop shortcuts and Windows Explorer folder/drive integration.
 
-The reusable scanning engine is published as `Naxterra.DiskLoom.Core` under [GitHub Packages](https://github.com/Naxterra/DiskLoom/packages).
+The reusable scanning engine `Naxterra.DiskLoom.Core` is attached to each release as a NuGet package (`.nupkg`).
 
 ## Included in 0.1
 
@@ -58,7 +58,7 @@ pwsh -File tools\Build-DiskLoom.ps1 -Publish
 pwsh -File tools\Build-DiskLoomInstaller.ps1
 ```
 
-The ready-to-install MSI is written to `artifacts\DiskLoom\installer\DiskLoom-Setup-x64.msi`. The portable/self-contained build is under `artifacts\DiskLoom\win-x64`.
+The ready-to-install English and German MSIs are written to `artifacts\DiskLoom\installer\DiskLoom-Setup-x64.msi` and `DiskLoom-Setup-x64-de-DE.msi`. The portable/self-contained build is under `artifacts\DiskLoom\win-x64`.
 
 ## CLI and scheduled scans
 
@@ -106,4 +106,4 @@ Uninstalling DiskLoom in Apps & Features removes the program, its shortcuts and 
 - Duplicate search never reads online-only cloud files (Nextcloud, OneDrive and other placeholders), because reading them would download them; it reports how many it skipped.
 - Duplicate search skips files that changed after the scan, and deleting a duplicate is refused if the file changed since the check.
 - Deleting or moving items updates the scan itself, so totals, charts, statistics, snapshots and exports match the disk without a rescan.
-- Hard-linked data is counted once, always on the same path, also in filtered views.
+- Hard-linked data is counted once, always on the same path, also in filtered views. This relies on the file IDs that NTFS and ReFS report. In the rare folder that can only be listed without them, each hard link is counted.

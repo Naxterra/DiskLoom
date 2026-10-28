@@ -41,7 +41,8 @@ internal static class DiskLoomCli
                 Parallelism = options.Parallelism,
                 CalculateAllocatedSize = true,
                 FollowReparsePoints = options.FollowLinks,
-                ExcludePatterns = options.Excludes.Count == 0 ? new ScanOptions().ExcludePatterns : options.Excludes
+                // --exclude adds to the default exclusions ($RECYCLE.BIN, System Volume Information) instead of replacing them.
+                ExcludePatterns = [.. new ScanOptions().ExcludePatterns, .. options.Excludes]
             }, progress, cancellation.Token);
 
             Console.WriteLine();
@@ -188,9 +189,9 @@ internal static class DiskLoomCli
               --snapshot FILE           Save a compressed .diskloom snapshot
               --duplicates FILE         Verify duplicates and export them as CSV
               --min-duplicate-mb NUMBER Ignore smaller files (default: 1 MB)
-              --exclude PATTERN         Exclude a name/path wildcard; repeat as needed
+              --exclude PATTERN         Also exclude a name or path wildcard (repeatable)
               --parallel NUMBER         Directory workers, 1–32
-              --follow-links            Follow directory reparse points with loop protection
+              --follow-links            Follow directory links, counting each folder once
               --help                    Show this help
 
             Exit codes: 0 success, 1 error, 2 completed with access issues, 130 canceled.

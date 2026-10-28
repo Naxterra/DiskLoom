@@ -112,7 +112,8 @@ public sealed record ScanResult(
     public TimeSpan Duration => CompletedUtc - StartedUtc;
 }
 
-public sealed record DuplicateFile(string Path, long Size, DateTimeOffset LastWriteUtc);
+// ChangeUtc is the file's change time when the duplicate check read it, or null where the file system has none.
+public sealed record DuplicateFile(string Path, long Size, DateTimeOffset LastWriteUtc, DateTime? ChangeUtc = null);
 
 public sealed record DuplicateGroup(string Sha256, long FileSize, IReadOnlyList<DuplicateFile> Files)
 {

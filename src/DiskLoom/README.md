@@ -97,4 +97,4 @@ Uninstalling DiskLoom in Apps & Features removes the program, its shortcuts and 
 - Duplicate search never reads online-only cloud files (Nextcloud, OneDrive and other placeholders), because reading them would download them; it reports how many it skipped.
 - Duplicate search skips files that changed after the scan, and deleting a duplicate is refused if the file changed since the check.
 - Deleting or moving items updates the scan itself, so totals, charts, statistics, snapshots and exports match the disk without a rescan.
-- Hard-linked data is counted once, always on the same path, also in filtered views.
+- Hard-linked data is counted once, always on the same path, also in filtered views. This relies on the file IDs that NTFS and ReFS report. In the rare folder that can only be listed without them, each hard link is counted.

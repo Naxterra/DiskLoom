@@ -134,6 +134,27 @@ public static class WindowsPaths
         path.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase) ? @"\\" + path[8..]
         : path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path[4..]
         : path;
+
+    // True for a drive root and for a volume mounted in a folder, such as C:\Mount\USB. Deleting or moving one
+    // would empty a whole volume, so the file operations refuse it.
+    public static bool IsVolumeRoot(string path)
+    {
+        var plain = StripExtendedPrefix(path.Trim());
+        if (plain.Length is 2 or 3 && char.IsAsciiLetter(plain[0]) && plain[1] == ':' && (plain.Length == 2 || plain[2] is '\\' or '/'))
+        {
+            return true;
+        }
+
+        var buffer = new char[1024];
+        var volume = GetVolumePathName(plain, buffer, (uint)buffer.Length)
+            ? new string(buffer, 0, Math.Max(0, Array.IndexOf(buffer, '\0')))
+            : Path.GetPathRoot(plain);
+        return !string.IsNullOrEmpty(volume) &&
+               string.Equals(Path.TrimEndingDirectorySeparator(volume), Path.TrimEndingDirectorySeparator(plain), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "GetVolumePathNameW", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool GetVolumePathName(string fileName, [Out] char[] volumePathName, uint bufferLength);
 }
 
 public sealed class FileOperationService
@@ -147,6 +168,7 @@ public sealed class FileOperationService
         {
             throw new IOException($"The name ends with a dot or space, which the Recycle Bin cannot handle safely: {path}");
         }
+        RefuseVolumeRoot(path);
         var extended = WindowsPaths.ToExtended(path);
         if (!File.Exists(extended) && !Directory.Exists(extended))
         {
@@ -168,6 +190,7 @@ public sealed class FileOperationService
     public Task DeletePermanentlyAsync(string path, CancellationToken cancellationToken = default) => Task.Run(() =>
     {
         cancellationToken.ThrowIfCancellationRequested();
+        RefuseVolumeRoot(path);
         // The extended path deletes exactly the named item, also when its name ends in a dot or space.
         var extended = WindowsPaths.ToExtended(path);
         if (File.Exists(extended))
@@ -184,16 +207,36 @@ public sealed class FileOperationService
         }
     }, cancellationToken);
 
+    // Explorer and the shell trim a name ending in a dot or space and would show, open or describe its twin (the
+    // item without the dot or space). Such items are shown by opening the folder that holds them, and opening them
+    // or showing their properties is refused.
     public void ShowInExplorer(string path)
     {
-        var arguments = File.Exists(path) ? $"/select,\"{path}\"" : $"\"{path}\"";
+        var arguments = WindowsPaths.HasTrimmedSegment(path)
+            ? $"\"{Path.GetDirectoryName(path)}\""
+            : File.Exists(path) ? $"/select,\"{path}\"" : $"\"{path}\"";
         Process.Start(new ProcessStartInfo("explorer.exe", arguments) { UseShellExecute = true });
     }
 
-    public void Open(string path) => Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+    public void Open(string path)
+    {
+        RefuseTrimmedName(path);
+        Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+    }
 
-    public bool ShowProperties(nint ownerWindow, string path) =>
-        OperatingSystem.IsWindows() && SHObjectProperties(ownerWindow, ShopFilePath, path, null);
+    public bool ShowProperties(nint ownerWindow, string path)
+    {
+        RefuseTrimmedName(path);
+        return OperatingSystem.IsWindows() && SHObjectProperties(ownerWindow, ShopFilePath, path, null);
+    }
+
+    private static void RefuseTrimmedName(string path)
+    {
+        if (WindowsPaths.HasTrimmedSegment(path))
+        {
+            throw new IOException($"The name ends with a dot or space, which Windows would open as a different item: {path}");
+        }
+    }
 
     // Copies or moves with Explorer's own engine: progress dialog, name-conflict prompts,
     // cross-volume moves and Undo in Explorer all behave exactly as in File Explorer.
@@ -214,6 +257,13 @@ public sealed class FileOperationService
         if (sources.FirstOrDefault(WindowsPaths.HasTrimmedSegment) is { } trimmedPath)
         {
             throw new IOException($"The name ends with a dot or space, which Windows cannot copy, move or recycle safely: {trimmedPath}");
+        }
+        if (operation is FoMove or FoDelete)
+        {
+            foreach (var source in sources)
+            {
+                RefuseVolumeRoot(source);
+            }
         }
         if (operation != FoDelete)
         {
@@ -255,6 +305,14 @@ public sealed class FileOperationService
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
         return completion.Task;
+    }
+
+    private static void RefuseVolumeRoot(string path)
+    {
+        if (WindowsPaths.IsVolumeRoot(path))
+        {
+            throw new InvalidOperationException($"DiskLoom never deletes or moves a drive or volume root: {path}");
+        }
     }
 
     private const uint FoMove = 0x0001;

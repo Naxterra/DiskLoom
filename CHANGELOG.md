@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.27 (2026-10-28)
+
+- Deleting from the duplicate list now checks the disk, not only the list: if another program removed or changed the other copies after the check, deleting the last intact copy is refused. The check runs again after you confirm, in case the files changed while the dialog was open.
+- A duplicate counts as changed when it was rewritten with other content of the same size, even if its modification time was set back, because DiskLoom now also compares the file's change time, which programs cannot set back.
+- When deleting or recycling a folder fails partway, for example because one file is open, the scan drops the files that are already gone and keeps counting the rest, and the message says that part of the folder was removed.
+- Deleting, recycling or moving a drive root or a volume mounted in a folder is refused by the file operations themselves, not only by the menus.
+- PDF exports are written to a temporary file first, like the other exports, so a failed export no longer damages an existing PDF. All temporary files are hidden, written to the disk before they replace the old file, and removed at the next start if DiskLoom was closed while writing.
+- Update installers are deleted as soon as Windows Installer has finished, and the startup cleanup also removes partial downloads and what a failed or declined install left behind.
+- An update check that fails, for example offline, is now recorded too, so it is not repeated at every start.
+- Scans of other folders that are kept in memory are forgotten when a deletion or move affects them, so switching back to them never shows removed items. An export started while the scan changed exports the current state.
+- With `--follow-links`, the command line no longer counts a folder twice when it is reached through several links, and `--exclude` now adds to the default exclusions instead of replacing them.
+- Open and Properties refuse items whose name ends in a dot or space, because Windows would open a different item, and Show in Explorer opens the folder that holds them.
+- The repository now contains `CHECKLIST.md`, which lists what DiskLoom must never do, such as deleting the wrong item, deleting every copy of a duplicate or leaving files behind after uninstalling. Every release is checked against it.
+- README and privacy notes are corrected: the NuGet package of the core is attached to each release, hard links are counted once where the file system reports file IDs, and PDF export uses Microsoft Edge WebView2.
+
 ## 0.1.26 (2026-10-27)
 
 - Fixed deleting an item whose name ends in a dot or space (common on drives written by Linux or macOS) deleting a different item instead: Windows trims such names, so deleting `Backup ` removed `Backup`. Permanent deletion now removes exactly the named item, the scanner reads such folders as themselves, and the Recycle Bin, copy and move refuse such names with an explanation because Windows cannot handle them safely.
