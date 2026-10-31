@@ -6,8 +6,8 @@
     <Nullable>enable</Nullable>
     <PackageId>Naxterra.DiskLoom.Core</PackageId>
     <Description>Core Windows filesystem scanning and storage-analysis engine for DiskLoom.</Description>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
     <PackageTags>windows;storage;filesystem;disk-analysis</PackageTags>
     <RepositoryUrl>https://github.com/Naxterra/DiskLoom</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
@@ -19,5 +19,6 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="..\DiskLoom\README.md" Pack="true" PackagePath="\" Link="README.md" />
+    <None Include="..\..\LICENSE" Pack="true" PackagePath="\" Link="LICENSE" />
   </ItemGroup>
 </Project>

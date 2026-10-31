@@ -8,7 +8,7 @@
     <AssemblyName Condition="'$(DiskLoomAssemblyName)' == ''">DiskLoom</AssemblyName>
     <AssemblyName Condition="'$(DiskLoomAssemblyName)' != ''">$(DiskLoomAssemblyName)</AssemblyName>
     <Product>DiskLoom</Product>
-    <Version>0.1.27</Version>
+    <Version>0.1.28</Version>
     <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
     <RepositoryUrl>https://github.com/Naxterra/DiskLoom</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
@@ -40,6 +40,8 @@
   <ItemGroup>
     <Content Include="update-config.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="PRIVACY.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\THIRD-PARTY-NOTICES.txt" Link="THIRD-PARTY-NOTICES.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Assets\AppIcon.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Assets\AppIcon-32.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Assets\DiskLoom-Mark.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />

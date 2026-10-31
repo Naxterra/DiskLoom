@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.28 (2026-10-31)
+
+- The license changed to the Nax Source-Available License 1.0. You may still install and use the app. Modifying, redistributing or selling it needs written permission.
+
 ## 0.1.27 (2026-10-28)
 
 - Deleting from the duplicate list now checks the disk, not only the list: if another program removed or changed the other copies after the check, deleting the last intact copy is refused. The check runs again after you confirm, in case the files changed while the dialog was open.

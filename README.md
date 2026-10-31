@@ -3,7 +3,7 @@
 # DiskLoom
 
 [![Latest release](https://img.shields.io/github/v/release/Naxterra/DiskLoom)](https://github.com/Naxterra/DiskLoom/releases/latest)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: Nax Source-Available](https://img.shields.io/badge/license-Nax%20Source--Available-blue.svg)](LICENSE)
 
 Canonical repository: [github.com/Naxterra/DiskLoom](https://github.com/Naxterra/DiskLoom)
 
@@ -107,3 +107,7 @@ Uninstalling DiskLoom in Apps & Features removes the program, its shortcuts and 
 - Duplicate search skips files that changed after the scan, and deleting a duplicate is refused if the file changed since the check.
 - Deleting or moving items updates the scan itself, so totals, charts, statistics, snapshots and exports match the disk without a rescan.
 - Hard-linked data is counted once, always on the same path, also in filtered views. This relies on the file IDs that NTFS and ReFS report. In the rare folder that can only be listed without them, each hard link is counted.
+
+## License
+
+This software is under the Nax Source-Available License 1.0. You may install and use the official release builds, privately and at work, and you may read the source code. Modifying the software, redistributing it and selling it need the written permission of the owner. See [LICENSE](LICENSE).
