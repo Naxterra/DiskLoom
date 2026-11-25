@@ -38,7 +38,7 @@ public sealed class ExportService
                 node.LastAccessUtc.ToString("O"),
                 node.Attributes.ToString(),
                 node.VolumeSerialNumber.ToString("X8"),
-                node.FileId.ToString("X16"),
+                node.FileIdHigh == 0 ? node.FileId.ToString("X16") : $"{node.FileIdHigh:X16}{node.FileId:X16}",
                 // Empty = not queried; directory enumeration does not report link counts.
                 node.HardLinkCount == 0 ? string.Empty : node.HardLinkCount.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 node.IsAdditionalHardLink.ToString()

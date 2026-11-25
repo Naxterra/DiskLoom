@@ -2,6 +2,8 @@ using DiskLoom.Core.Models;
 using DiskLoom.Core.Services;
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 
 // Named scenario tests over shared fixtures. Each test prints "Program.cs::name", its scenario and PASS or FAIL;
@@ -147,8 +149,48 @@ try
         await RequireThrowsAsync<IOException>(() => fileOperations.RecycleAsync(dottedFile));
         Require(File.Exists(plainFile) && File.Exists(WindowsPaths.ToExtended(dottedFile)), "No file may be touched.");
     });
+    Test("scan_root_ending_in_space_keeps_its_name_and_contents", "Scanning b with a trailing space directly, quoted or extended, reads that folder rather than its ordinary-name twin.", async () =>
+    {
+        foreach (var path in new[] { spacedFolder, $"\"{spacedFolder}\"", WindowsPaths.ToExtended(spacedFolder) })
+        {
+            var scan = await scanner.ScanAsync(path);
+            Require(WindowsPaths.StripExtendedPrefix(scan.Root.FullPath) == spacedFolder && scan.Root.Name == "b ", "The scan root must retain the selected folder's exact name.");
+            Require(scan.Root.Files().Select(static file => file.Name).SequenceEqual(["other.txt"]), "Scanning the root must read its own contents, not the twin's.");
+        }
+    });
+    Test("scan_root_ending_in_dot_needs_no_ordinary_name_twin", "A folder ending in a dot can be scanned directly even when no trimmed-name twin exists.", async () =>
+    {
+        var path = Path.Combine(trimmedRoot, "OnlyDotted.");
+        Directory.CreateDirectory(WindowsPaths.ToExtended(path));
+        await File.WriteAllTextAsync(WindowsPaths.ToExtended(Path.Combine(path, "own.txt")), "own contents");
+        var scan = await scanner.ScanAsync(path);
+        Require(scan.Root.FullPath == path && scan.Root.FileCount == 1 && scan.Root.Files().Single().Name == "own.txt" && scan.Issues.Count == 0,
+            "Root existence, metadata and enumeration must all address the exact dotted folder.");
+    });
     Test("copy_refuses_folder_ending_in_space", "Copying \"b \" with Explorer's engine is refused, because it would copy \"b\" instead.", async () =>
         await RequireThrowsAsync<IOException>(() => fileOperations.CopyAsync([spacedFolder], testRoot, nint.Zero)));
+    Test("copy_refuses_destination_with_trimmed_name", "Copying to a folder ending in a space is refused without writing into either it or its twin.", async () =>
+    {
+        var source = Path.Combine(trimmedRoot, "copy-source.txt");
+        await File.WriteAllTextAsync(source, "keep source");
+        await RequireThrowsAsync<IOException>(() => fileOperations.CopyAsync([source], spacedFolder, 0));
+        Require(File.ReadAllText(source) == "keep source" &&
+                !File.Exists(Path.Combine(plainFolder, "copy-source.txt")) &&
+                !File.Exists(WindowsPaths.ToExtended(Path.Combine(spacedFolder, "copy-source.txt"))), "A refused copy must leave both destinations untouched.");
+    });
+    Test("move_refuses_destination_with_trimmed_ancestor", "Moving into a child of a dotted folder is refused without moving the source into the ordinary-name twin.", async () =>
+    {
+        var parent = Path.Combine(trimmedRoot, "MoveDestination");
+        var destination = Path.Combine(parent + ".", "Child");
+        var twin = Directory.CreateDirectory(Path.Combine(parent, "Child")).FullName;
+        Directory.CreateDirectory(WindowsPaths.ToExtended(destination));
+        var source = Path.Combine(trimmedRoot, "move-source.txt");
+        await File.WriteAllTextAsync(source, "keep source");
+        await RequireThrowsAsync<IOException>(() => fileOperations.MoveAsync([source], destination, 0));
+        Require(File.ReadAllText(source) == "keep source" &&
+                !File.Exists(Path.Combine(twin, "move-source.txt")) &&
+                !File.Exists(WindowsPaths.ToExtended(Path.Combine(destination, "move-source.txt"))), "A refused move must keep the source and leave both destinations untouched.");
+    });
     Test("permanent_delete_of_name_ending_in_dot_removes_only_that_file", "Deleting \"a.\" permanently removes exactly \"a.\" and leaves \"a\".", async () =>
     {
         await fileOperations.DeletePermanentlyAsync(dottedFile);
@@ -162,6 +204,13 @@ try
     TestSync("trimmed_segment_detection_checks_every_segment", "A dot or space at the end of any path segment is detected, but \".\" and \"..\" are not.", () =>
         Require(WindowsPaths.HasTrimmedSegment(@"C:\x\b \file.txt") && WindowsPaths.HasTrimmedSegment(@"C:\x\a.") &&
                 !WindowsPaths.HasTrimmedSegment(@"C:\x\a.txt") && !WindowsPaths.HasTrimmedSegment(@"C:\x\..\y"), "Trimmed-name detection is wrong."));
+    TestSync("scan_path_normalization_preserves_relative_names", "Relative navigation, quoted padding and alternate separators preserve dots and spaces in real folder names.", () =>
+    {
+        var expected = Path.Combine(Environment.CurrentDirectory, " Leaf. ");
+        Require(ScanPaths.Normalize(@".\Inner.\..\ Leaf. ") == expected, "Relative dot segments must resolve without trimming the final name.");
+        Require(ScanPaths.Normalize("  \"" + expected + "\"  ") == expected, "Padding outside quotes must not trim the quoted name.");
+        Require(ScanPaths.Normalize(expected.Replace('\\', '/')) == expected, "Alternate separators must preserve the selected name.");
+    });
 
     // ---- Search, filter and charts ---------------------------------------------------------------
 
@@ -401,6 +450,23 @@ try
         Require(File.ReadAllText(deepJsonPath).Contains("\"d59\"", StringComparison.Ordinal), "JSON export must handle deeply nested folders.");
     });
 
+    Test("atomic_writes_refuse_trimmed_targets_without_overwriting_twins", "Async exports, settings writes and completed-file replacement refuse ambiguous output names before changing any file.", async () =>
+    {
+        var folder = Directory.CreateDirectory(Path.Combine(testRoot, "AtomicNames")).FullName;
+        foreach (var suffix in new[] { ".", " " })
+        {
+            var path = Path.Combine(folder, suffix == "." ? "dot.txt" : "space.txt");
+            await File.WriteAllTextAsync(path, "keep twin");
+            await File.WriteAllTextAsync(WindowsPaths.ToExtended(path + suffix), "keep selected");
+            await RequireThrowsAsync<IOException>(() => AtomicFile.WriteAsync(path + suffix, stream => stream.WriteAsync(new byte[] { 1 }).AsTask()));
+            await RequireThrowsAsync<IOException>(() => Task.Run(() => AtomicFile.WriteAllText(path + suffix, "replacement")));
+            var temporary = Path.Combine(folder, "completed.tmp");
+            await File.WriteAllTextAsync(temporary, "completed export");
+            await RequireThrowsAsync<IOException>(() => Task.Run(() => AtomicFile.Replace(temporary, path + suffix)));
+            Require(File.ReadAllText(path) == "keep twin" && File.ReadAllText(WindowsPaths.ToExtended(path + suffix)) == "keep selected" &&
+                    File.ReadAllText(temporary) == "completed export", "Neither output twin nor the completed temporary file may change.");
+        }
+    });
     Test("atomic_write_failing_midway_keeps_original_file", "A write that fails after half of the data keeps the old file, and its temporary file is hidden while written and removed afterwards.", async () =>
     {
         var path = Path.Combine(testRoot, "midway.txt");
@@ -517,7 +583,99 @@ try
         Require(!snapshotService.Create(folderGone).Entries.Any(static entry => entry.RelativePath.StartsWith("src", StringComparison.OrdinalIgnoreCase)), "Snapshots of an edited scan must not contain removed items.");
     });
 
-    Test("failed_folder_delete_drops_exactly_the_removed_files", "When deleting a folder fails because one file is open, the scan drops the four files already deleted and keeps counting the open one.", async () =>
+    TestSync("permanent_delete_detects_protected_descendant_before_removing_anything", "The permission check finds an access-denied child and preserves it and its writable sibling.", () =>
+    {
+        var folder = Directory.CreateDirectory(Path.Combine(testRoot, "PermissionCheck"));
+        var lockedFolder = folder.CreateSubdirectory("Installer");
+        var child = new FileInfo(Path.Combine(lockedFolder.FullName, "Cleanup.dat"));
+        var sibling = Path.Combine(folder.FullName, "sibling.txt");
+        File.WriteAllText(child.FullName, "protected contents");
+        File.WriteAllText(sibling, "ordinary contents");
+
+        using var identity = WindowsIdentity.GetCurrent();
+        var user = identity.User ?? throw new InvalidOperationException("The test requires an interactive Windows user SID.");
+        var folderAcl = lockedFolder.GetAccessControl(AccessControlSections.Access);
+        var childAcl = child.GetAccessControl(AccessControlSections.Access);
+        var folderRule = new FileSystemAccessRule(user, FileSystemRights.DeleteSubdirectoriesAndFiles, AccessControlType.Deny);
+        var childRule = new FileSystemAccessRule(user, FileSystemRights.Delete, AccessControlType.Deny);
+        folderAcl.AddAccessRule(folderRule);
+        childAcl.AddAccessRule(childRule);
+        try
+        {
+            lockedFolder.SetAccessControl(folderAcl);
+            child.SetAccessControl(childAcl);
+            Require(fileOperations.PermanentDeletionRequiresElevation(folder.FullName), "A protected child must be detected before starting the deletion.");
+            Require(File.ReadAllText(child.FullName) == "protected contents" && File.ReadAllText(sibling) == "ordinary contents",
+                "Checking access must leave every file intact.");
+        }
+        finally
+        {
+            childAcl.RemoveAccessRuleSpecific(childRule);
+            child.SetAccessControl(childAcl);
+            folderAcl.RemoveAccessRuleSpecific(folderRule);
+            lockedFolder.SetAccessControl(folderAcl);
+        }
+    });
+
+    TestSync("permanent_delete_does_not_elevate_for_file_locks", "An ordinary file and the same file locked against deletion do not request administrator rights.", () =>
+    {
+        var path = Path.Combine(testRoot, "PermissionCheckLock.dat");
+        File.WriteAllText(path, "keep while checking");
+        Require(!fileOperations.PermanentDeletionRequiresElevation(path), "An ordinary writable file must not request administrator rights.");
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            Require(!fileOperations.PermanentDeletionRequiresElevation(path), "A sharing violation must not request administrator rights.");
+        }
+        Require(File.ReadAllText(path) == "keep while checking", "Checking access must not delete or modify the locked file.");
+    });
+
+    Test("permanent_delete_removes_read_only_file_without_changing_retained_hard_link", "Permanent deletion removes a selected read-only name and preserves the contents and attributes of a hard link outside the selection.", async () =>
+    {
+        var folder = Directory.CreateDirectory(Path.Combine(testRoot, "ReadOnlyFile")).FullName;
+        var keep = Path.Combine(folder, "Keep.dat");
+        var remove = Path.Combine(folder, "Cleanup.dat");
+        await File.WriteAllTextAsync(keep, "keep this content");
+        Require(NativeTestMethods.CreateHardLink(remove, keep, IntPtr.Zero), "Could not create the read-only hard link fixture.");
+        File.SetAttributes(keep, File.GetAttributes(keep) | FileAttributes.ReadOnly | FileAttributes.Hidden);
+        var originalAttributes = File.GetAttributes(keep);
+        try
+        {
+            await fileOperations.DeletePermanentlyAsync(remove);
+            Require(!File.Exists(remove) && File.ReadAllText(keep) == "keep this content" && File.GetAttributes(keep) == originalAttributes,
+                "Only the selected name can disappear. The retained link must keep the same contents and attributes.");
+        }
+        finally
+        {
+            File.SetAttributes(keep, originalAttributes & ~FileAttributes.ReadOnly);
+        }
+    });
+
+    Test("permanent_folder_delete_handles_read_only_children_and_leaves_junction_targets", "Permanent deletion removes a folder's read-only child and its junction without touching files under the junction's target.", async () =>
+    {
+        var folder = Directory.CreateDirectory(Path.Combine(testRoot, "ReadOnlyFolder")).FullName;
+        var selected = Directory.CreateDirectory(Path.Combine(folder, "Selected")).FullName;
+        var outside = Directory.CreateDirectory(Path.Combine(folder, "Outside")).FullName;
+        var child = Path.Combine(selected, "Cleanup.dat");
+        var keep = Path.Combine(outside, "Keep.dat");
+        await File.WriteAllTextAsync(child, "delete this file");
+        await File.WriteAllTextAsync(keep, "leave this file");
+        File.SetAttributes(child, File.GetAttributes(child) | FileAttributes.ReadOnly | FileAttributes.Hidden);
+        CreateJunction(Path.Combine(selected, "Junction"), outside);
+        try
+        {
+            await fileOperations.DeletePermanentlyAsync(selected);
+            Require(!Directory.Exists(selected) && File.ReadAllText(keep) == "leave this file", "The selected folder must disappear and the junction target must remain untouched.");
+        }
+        finally
+        {
+            if (File.Exists(child))
+            {
+                File.SetAttributes(child, File.GetAttributes(child) & ~FileAttributes.ReadOnly);
+            }
+        }
+    });
+
+    Test("failed_folder_delete_drops_exactly_the_removed_files", "A locked read-only file survives a partially successful deletion with its attributes intact, and the scan counts only that file.", async () =>
     {
         var partialRoot = Directory.CreateDirectory(Path.Combine(testRoot, "Partial")).FullName;
         var victim = Directory.CreateDirectory(Path.Combine(partialRoot, "Victim")).FullName;
@@ -525,15 +683,29 @@ try
         {
             await File.WriteAllBytesAsync(Path.Combine(victim, $"f{index}.bin"), new byte[1000 * index]);
         }
-        var partialScan = await scanner.ScanAsync(partialRoot);
-        using (new FileStream(Path.Combine(victim, "f3.bin"), FileMode.Open, FileAccess.Read, FileShare.Read))
+        var locked = Path.Combine(victim, "f3.bin");
+        var original = File.GetAttributes(locked) | FileAttributes.ReadOnly;
+        File.SetAttributes(locked, original);
+        try
         {
-            await RequireThrowsAsync<IOException>(() => fileOperations.DeletePermanentlyAsync(victim));
+            var partialScan = await scanner.ScanAsync(partialRoot);
+            using (new FileStream(locked, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                await RequireThrowsAsync<IOException>(() => fileOperations.DeletePermanentlyAsync(victim));
+                Require(File.GetAttributes(locked) == original, "The locked file must retain its read-only attribute.");
+            }
+            var vanished = ScanTreeEditor.FindVanished(partialScan.Root, victim);
+            Require(vanished.Count == 4 && !vanished.Contains(locked), $"Expected the four deleted files, found {vanished.Count}.");
+            var updated = ScanTreeEditor.RemovePaths(partialScan, vanished, DateTimeOffset.UtcNow);
+            Require(updated.Root.FileCount == 1 && updated.Root.Size == 3000, "The scan must keep only the file that is still there.");
         }
-        var vanished = ScanTreeEditor.FindVanished(partialScan.Root, victim);
-        Require(vanished.Count == 4 && !vanished.Any(static path => path.EndsWith("f3.bin", StringComparison.OrdinalIgnoreCase)), $"Expected the four deleted files, found {vanished.Count}.");
-        var updated = ScanTreeEditor.RemovePaths(partialScan, vanished, DateTimeOffset.UtcNow);
-        Require(updated.Root.FileCount == 1 && updated.Root.Size == 3000, "The scan must keep only the file that is still there.");
+        finally
+        {
+            if (File.Exists(locked))
+            {
+                File.SetAttributes(locked, original & ~FileAttributes.ReadOnly);
+            }
+        }
     });
 
     // ---- Updates -------------------------------------------------------------------------------------------
@@ -661,6 +833,224 @@ try
         Require(found.Groups.Count == 1 && found.Groups[0].Files.Count == 2, "The duplicate fixture must form one group of two.");
         return found.Groups[0];
     }
+
+    Test("default_system_folders_are_scanned_unless_excluded_explicitly", "A default scan includes $RECYCLE.BIN and System Volume Information, while SystemProtectedFolderPatterns excludes them.", async () =>
+    {
+        var sysRoot = Directory.CreateDirectory(Path.Combine(testRoot, "SysFolders")).FullName;
+        var recycle = Directory.CreateDirectory(Path.Combine(sysRoot, "$RECYCLE.BIN")).FullName;
+        var svi = Directory.CreateDirectory(Path.Combine(sysRoot, "System Volume Information")).FullName;
+        await File.WriteAllBytesAsync(Path.Combine(recycle, "trashed.bin"), new byte[1024]);
+        await File.WriteAllBytesAsync(Path.Combine(svi, "tracking.bin"), new byte[2048]);
+        var defaultScan = await scanner.ScanAsync(sysRoot, new ScanOptions());
+        Require(defaultScan.Root.FileCount == 2 && defaultScan.Root.Size == 3072, "Default scan must include system protected folders.");
+        var excludedScan = await scanner.ScanAsync(sysRoot, new ScanOptions { ExcludePatterns = ScanOptions.SystemProtectedFolderPatterns });
+        Require(excludedScan.Root.FileCount == 0 && excludedScan.Root.FolderCount == 0, "SystemProtectedFolderPatterns must exclude those folders.");
+    });
+    TestSync("volume_root_detection_handles_slashes_relative_segments_and_extra_separators", "IsVolumeRoot recognizes drive roots regardless of trailing slash variants or dot segments and rejects normal subfolders.", () =>
+    {
+        var systemDriveRoot = Path.GetPathRoot(Environment.SystemDirectory)!;
+        var bareDrive = systemDriveRoot.TrimEnd('\\');
+        var slashDrive = bareDrive + "/";
+        var doubleSlash = bareDrive + "\\\\";
+        var parentDot = Path.Combine(systemDriveRoot, "Windows", "..");
+        var childDot = Path.Combine(Environment.SystemDirectory, "..");
+        Require(WindowsPaths.IsVolumeRoot(bareDrive), "Bare drive colon must be detected as a volume root.");
+        Require(WindowsPaths.IsVolumeRoot(systemDriveRoot), "Drive root with backslash must be detected.");
+        Require(WindowsPaths.IsVolumeRoot(slashDrive), "Drive root with forward slash must be detected.");
+        Require(WindowsPaths.IsVolumeRoot(doubleSlash), "Drive root with extra separators must be detected.");
+        Require(WindowsPaths.IsVolumeRoot(parentDot), "Drive root reached through dot segments must be detected.");
+        Require(!WindowsPaths.IsVolumeRoot(childDot), "Subfolder reached through dot segments must not be treated as a volume root.");
+        Require(!WindowsPaths.IsVolumeRoot(Environment.SystemDirectory), "Windows system directory must not be detected as a volume root.");
+    });
+    TestSync("find_contained_volume_root_ignores_ordinary_directory_junctions", "FindContainedVolumeRoot returns null when a folder contains an ordinary directory junction rather than a mounted volume.", () =>
+    {
+        var junctionHost = Directory.CreateDirectory(Path.Combine(testRoot, "JunctionHost")).FullName;
+        var container = Directory.CreateDirectory(Path.Combine(junctionHost, "Container")).FullName;
+        var target = Directory.CreateDirectory(Path.Combine(junctionHost, "Target")).FullName;
+        File.WriteAllText(Path.Combine(target, "nested.txt"), "data");
+        CreateJunction(Path.Combine(container, "LinkToTarget"), target);
+        Require(WindowsPaths.FindContainedVolumeRoot(container) is null, "An ordinary junction must not trigger mounted-volume refusal.");
+    });
+    TestSync("scan_paths_preserve_trailing_dots_and_spaces", "ScanPaths.GetChain and GetParent keep trailing spaces and dots intact.", () =>
+    {
+        const string trickyPath = @"C:\Temp\folder. \item.";
+        var chain = ScanPaths.GetChain(trickyPath);
+        Require(chain.SequenceEqual([@"C:\", @"C:\Temp", @"C:\Temp\folder. ", @"C:\Temp\folder. \item."]), "GetChain must preserve trailing spaces and dots.");
+        Require(ScanPaths.GetParent(trickyPath) == @"C:\Temp\folder. ", "GetParent must preserve trailing spaces on the parent segment.");
+    });
+    Test("delete_permanently_removes_readonly_directory", "DeletePermanentlyAsync deletes a directory marked ReadOnly along with its read-only files.", async () =>
+    {
+        var readOnlyDir = Directory.CreateDirectory(Path.Combine(testRoot, "ReadOnlyFolder")).FullName;
+        var readOnlyFile = Path.Combine(readOnlyDir, "locked.txt");
+        await File.WriteAllTextAsync(readOnlyFile, "readonly");
+        File.SetAttributes(readOnlyFile, FileAttributes.ReadOnly);
+        File.SetAttributes(readOnlyDir, File.GetAttributes(readOnlyDir) | FileAttributes.ReadOnly);
+        await fileOperations.DeletePermanentlyAsync(readOnlyDir);
+        Require(!Directory.Exists(readOnlyDir), "Read-only directory must be deleted.");
+    });
+    Test("delete_permanently_normalizes_forward_slashes_and_dot_segments", "PermanentDeletionRequiresElevation and DeletePermanentlyAsync accept forward slashes and dot segments.", async () =>
+    {
+        var normDir = Directory.CreateDirectory(Path.Combine(testRoot, "NormSub")).FullName;
+        var normFile = Path.Combine(normDir, "slash.txt");
+        await File.WriteAllTextAsync(normFile, "norm");
+        var unnormalized = $"{testRoot.Replace('\\', '/')}/NormSub/../NormSub/slash.txt";
+        Require(!fileOperations.PermanentDeletionRequiresElevation(unnormalized), "Permission check must handle forward slashes and dot segments cleanly.");
+        await fileOperations.DeletePermanentlyAsync(unnormalized);
+        Require(!File.Exists(normFile), "File referenced with forward slashes and dot segments must be deleted.");
+    });
+    Test("duplicate_finder_skips_non_cloud_reparse_points", "DuplicateFinder ignores files marked as non-cloud reparse points while still grouping ordinary duplicate files.", async () =>
+    {
+        var repRoot = Directory.CreateDirectory(Path.Combine(testRoot, "ReparseDupes")).FullName;
+        var aPath = Path.Combine(repRoot, "a.bin");
+        var bPath = Path.Combine(repRoot, "b.bin");
+        var linkPath = Path.Combine(repRoot, "c.bin");
+        await File.WriteAllBytesAsync(aPath, duplicateBytes);
+        await File.WriteAllBytesAsync(bPath, duplicateBytes);
+        await File.WriteAllBytesAsync(linkPath, duplicateBytes);
+        var repRootNode = new ScanNode
+        {
+            Name = "ReparseDupes",
+            FullPath = repRoot,
+            IsDirectory = true,
+            Children =
+            [
+                new ScanNode { Name = "a.bin", FullPath = aPath, IsDirectory = false, Size = duplicateBytes.Length },
+                new ScanNode { Name = "b.bin", FullPath = bPath, IsDirectory = false, Size = duplicateBytes.Length },
+                new ScanNode { Name = "c.bin", FullPath = linkPath, IsDirectory = false, Size = duplicateBytes.Length, Attributes = FileAttributes.ReparsePoint, ReparsePointTag = 0xA000000C }
+            ]
+        };
+        var found = await new DuplicateFinder().FindAsync(repRootNode, minimumFileSize: 1);
+        Require(found.SkippedCloudFiles == 0 && found.Groups.Count == 1 && found.Groups[0].Files.Count == 2, "Non-cloud reparse entry must be ignored without counting as cloud-skipped.");
+    });
+    TestSync("scan_tree_editor_detaches_exact_case_before_ignore_case", "Removing a path from a folder holding two case-differing children removes the exact-case child first.", () =>
+    {
+        var lower = new ScanNode { Name = "data", FullPath = @"C:\Case\data", IsDirectory = false, Size = 10, AllocatedSize = 16, FileCount = 1 };
+        var upper = new ScanNode { Name = "Data", FullPath = @"C:\Case\Data", IsDirectory = false, Size = 20, AllocatedSize = 32, FileCount = 1 };
+        var caseRoot = new ScanNode
+        {
+            Name = "Case",
+            FullPath = @"C:\Case",
+            IsDirectory = true,
+            Size = 30,
+            AllocatedSize = 48,
+            FileCount = 2,
+            Children = [lower, upper]
+        };
+        var edited = ScanTreeEditor.RemovePaths(
+            new ScanResult(caseRoot, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, [], [], []),
+            [@"C:\Case\Data"],
+            DateTimeOffset.UtcNow);
+        Require(edited.Root.Children.Count == 1 && string.Equals(edited.Root.Children[0].Name, "data", StringComparison.Ordinal),
+            "Exact-case child must be removed before any case-insensitive match.");
+    });
+    TestSync("storage_insight_service_skips_cloud_only_and_additional_hard_links", "StorageInsightService excludes online-only cloud files and duplicate hard links and honors allocated-size mode.", () =>
+    {
+        var staleDate = DateTimeOffset.UtcNow.AddDays(-900);
+        const long twoGiB = 2L * 1024 * 1024 * 1024;
+        const long realLogical = 1500L * 1024 * 1024;
+        const long realAllocated = 2500L * 1024 * 1024;
+        var rootNode = new ScanNode
+        {
+            Name = "InsightsCase",
+            FullPath = @"C:\InsightsCase",
+            IsDirectory = true,
+            Children =
+            [
+                new ScanNode { Name = "cloud.tmp", FullPath = @"C:\InsightsCase\cloud.tmp", IsDirectory = false, Size = twoGiB, AllocatedSize = 0, Attributes = FileAttributes.Offline, LastWriteUtc = staleDate },
+                new ScanNode { Name = "hardlink.tmp", FullPath = @"C:\InsightsCase\hardlink.tmp", IsDirectory = false, Size = twoGiB, AllocatedSize = 0, IsAdditionalHardLink = true, SharesStorage = true, LastWriteUtc = staleDate },
+                new ScanNode { Name = "local.tmp", FullPath = @"C:\InsightsCase\local.tmp", IsDirectory = false, Size = realLogical, AllocatedSize = realAllocated, LastWriteUtc = staleDate }
+            ]
+        };
+        var synthetic = new ScanResult(rootNode, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, [], [], []);
+        var insights = new StorageInsightService().Analyze(synthetic, useAllocated: true);
+        Require(insights.Where(static i => i.Kind is "LargeFile" or "StaleFile").All(static i => i.Path.EndsWith("local.tmp", StringComparison.Ordinal)),
+            "Cloud-only and additional hard links must not appear as individual insights.");
+        var large = insights.Single(static i => i.Kind == "LargeFile");
+        Require(large.PotentialBytes == realAllocated, $"Expected allocated bytes {realAllocated}, got {large.PotentialBytes}.");
+        var temp = insights.Single(static i => i.Kind == "TemporaryFiles");
+        Require(temp.PotentialBytes == realAllocated && temp.ItemCount == 1, "Temporary file totals must exclude cloud-only and duplicate hard links.");
+    });
+    TestSync("folder_breakdown_uses_allocated_sizes_when_requested", "FolderBreakdown.Create reports AllocatedSize for children, extensions, categories and ages when useAllocated is true.", () =>
+    {
+        var now = DateTimeOffset.UtcNow;
+        var childA = new ScanNode
+        {
+            Name = "DirA",
+            FullPath = @"C:\Break\DirA",
+            IsDirectory = true,
+            Size = 100,
+            AllocatedSize = 4096,
+            FileCount = 1,
+            Children = [new ScanNode { Name = "a.bin", FullPath = @"C:\Break\DirA\a.bin", IsDirectory = false, Size = 100, AllocatedSize = 4096, LastWriteUtc = now }]
+        };
+        var childB = new ScanNode
+        {
+            Name = "DirB",
+            FullPath = @"C:\Break\DirB",
+            IsDirectory = true,
+            Size = 200,
+            AllocatedSize = 512,
+            FileCount = 1,
+            Children = [new ScanNode { Name = "b.txt", FullPath = @"C:\Break\DirB\b.txt", IsDirectory = false, Size = 200, AllocatedSize = 512, LastWriteUtc = now }]
+        };
+        var breakRoot = new ScanNode { Name = "Break", FullPath = @"C:\Break", IsDirectory = true, Size = 300, AllocatedSize = 4608, FileCount = 2, FolderCount = 2, Children = [childA, childB] };
+        var logicalChildren = FolderBreakdown.Create(breakRoot, BreakdownKind.Children, 10, now, useAllocated: false);
+        var allocatedChildren = FolderBreakdown.Create(breakRoot, BreakdownKind.Children, 10, now, useAllocated: true);
+        var allocatedCategories = FolderBreakdown.Create(breakRoot, BreakdownKind.Categories, 10, now, useAllocated: true);
+        var allocatedAges = FolderBreakdown.Create(breakRoot, BreakdownKind.Ages, 10, now, useAllocated: true);
+        Require(logicalChildren[0].Label == "DirB" && logicalChildren[0].Size == 200, "Logical breakdown must rank DirB first.");
+        Require(allocatedChildren[0].Label == "DirA" && allocatedChildren[0].Size == 4096, "Allocated breakdown must rank DirA first with 4096.");
+        Require(allocatedCategories.Sum(static s => s.Size) == 4608 && allocatedAges.Sum(static s => s.Size) == 4608, "Category and age allocated totals must sum to 4608.");
+    });
+    TestSync("update_service_canonicalizes_versions_and_waits_for_msiexec", "UpdateService normalizes trailing .0 version components and launches msiexec with -Wait -PassThru.", () =>
+    {
+        Require(UpdateService.CanonicalizeVersion("0.1.2.0") == "0.1.2", "4-part version ending in .0 must match its 3-part counterpart.");
+        Require(UpdateService.CanonicalizeVersion("00.01.02") == "0.1.2", "Leading zeros must normalize cleanly.");
+        Require(UpdateService.CanonicalizeVersion("0.1.2.3") == "0.1.2.3", "Non-zero revision must stay 4-part.");
+        Require(UpdateService.CanonicalizeVersion("0.1.20") == "0.1.20", "3-part version must remain canonical.");
+        var threw = false;
+        try
+        {
+            UpdateService.CanonicalizeVersion("../1.0.0");
+        }
+        catch (InvalidDataException)
+        {
+            threw = true;
+        }
+        Require(threw, "Invalid version strings must throw InvalidDataException.");
+        var script = UpdateService.BuildMsiRunnerScript();
+        Require(script.Contains("Start-Process", StringComparison.Ordinal) && script.Contains("-Wait", StringComparison.Ordinal) && script.Contains("-PassThru", StringComparison.Ordinal),
+            "MSI runner script must await msiexec completion via Start-Process -Wait -PassThru.");
+    });
+    Test("cli_rejects_unsupported_export_extension_and_non_finite_duplicate_threshold", "DiskLoom.Cli exits non-zero when --export uses .pdf or --min-duplicate-mb is NaN.", async () =>
+    {
+        var baseDir = Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory);
+        var tfm = Path.GetFileName(baseDir);
+        var config = Directory.GetParent(baseDir)!.Name;
+        var repoRoot = Directory.GetParent(baseDir)!.Parent!.Parent!.Parent!.Parent!.FullName;
+        var cliExe = Path.Combine(repoRoot, "src", "DiskLoom.Cli", "bin", config, tfm, "DiskLoom.Cli.exe");
+        Require(File.Exists(cliExe), $"Built CLI executable not found at {cliExe}.");
+
+        static async Task<(int ExitCode, string Error)> RunCliAsync(string exe, string arguments)
+        {
+            using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exe, arguments)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            })!;
+            var err = await process.StandardError.ReadToEndAsync();
+            await process.StandardOutput.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            return (process.ExitCode, err);
+        }
+
+        var (pdfExit, pdfErr) = await RunCliAsync(cliExe, $"--scan \"{firstDirectory.FullName}\" --export \"{Path.Combine(testRoot, "report.pdf")}\"");
+        var (nanExit, nanErr) = await RunCliAsync(cliExe, $"--scan \"{firstDirectory.FullName}\" --min-duplicate-mb NaN");
+        Require(pdfExit != 0 && pdfErr.Contains(".pdf", StringComparison.OrdinalIgnoreCase), "CLI must reject unsupported .pdf export extension.");
+        Require(nanExit != 0 && nanErr.Contains("--min-duplicate-mb", StringComparison.OrdinalIgnoreCase), "CLI must reject non-finite --min-duplicate-mb.");
+    });
 
     // ---- Run --------------------------------------------------------------------------------------------------
 

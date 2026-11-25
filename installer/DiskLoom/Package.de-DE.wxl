@@ -7,7 +7,9 @@
   <String Id="ProductLanguage" Value="1031" />
   <String Id="DowngradeError" Value="Eine neuere Version von DiskLoom ist bereits installiert." />
   <String Id="MainFeatureTitle" Value="DiskLoom-Anwendung" />
-  <String Id="MainFeatureDescription" Value="Erforderliche Anwendungsdateien und Explorer-Integration." />
+  <String Id="MainFeatureDescription" Value="Erforderliche Anwendungsdateien." />
+  <String Id="ExplorerFeatureTitle" Value="Explorer-Kontextmenü" />
+  <String Id="ExplorerFeatureDescription" Value="Fügt „Mit DiskLoom scannen“ zum Kontextmenü von Ordnern und Laufwerken hinzu." />
   <String Id="StartMenuFeatureTitle" Value="Startmenü-Verknüpfung" />
   <String Id="StartMenuFeatureDescription" Value="DiskLoom zum Startmenü für alle Benutzer hinzufügen." />
   <String Id="DesktopFeatureTitle" Value="Desktopverknüpfung" />

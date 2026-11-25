@@ -7,7 +7,9 @@
   <String Id="ProductLanguage" Value="1033" />
   <String Id="DowngradeError" Value="A newer version of DiskLoom is already installed." />
   <String Id="MainFeatureTitle" Value="DiskLoom application" />
-  <String Id="MainFeatureDescription" Value="Required application files and Explorer integration." />
+  <String Id="MainFeatureDescription" Value="Required application files." />
+  <String Id="ExplorerFeatureTitle" Value="Explorer context menu" />
+  <String Id="ExplorerFeatureDescription" Value="Add Scan with DiskLoom to folder and drive context menus." />
   <String Id="StartMenuFeatureTitle" Value="Start menu shortcut" />
   <String Id="StartMenuFeatureDescription" Value="Add DiskLoom to the all-users Start menu." />
   <String Id="DesktopFeatureTitle" Value="Desktop shortcut" />

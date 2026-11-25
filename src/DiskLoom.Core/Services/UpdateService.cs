@@ -289,14 +289,15 @@ public sealed class UpdateService(HttpClient? httpClient = null)
             throw new InvalidDataException("The update must be an MSI or EXE installer.");
         }
 
+        var canonicalVersion = CanonicalizeVersion(manifest.Version);
         var updateDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "DiskLoom",
             "Updates",
-            manifest.Version);
+            canonicalVersion);
         Directory.CreateDirectory(updateDirectory);
-        var destination = Path.Combine(updateDirectory, $"DiskLoom-{manifest.Version}{extension}");
-        var temporary = Path.Combine(updateDirectory, $"DiskLoom-{manifest.Version}.download{extension}");
+        var destination = Path.Combine(updateDirectory, $"DiskLoom-{canonicalVersion}{extension}");
+        var temporary = Path.Combine(updateDirectory, $"DiskLoom-{canonicalVersion}.download{extension}");
 
         using var response = await _httpClient.GetAsync(installerUri, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
@@ -344,7 +345,7 @@ public sealed class UpdateService(HttpClient? httpClient = null)
             throw new CryptographicException(signatureError);
         }
 
-        if (extension == ".msi" && !IsExpectedMsi(temporary, manifest.Version, out var packageError))
+        if (extension == ".msi" && !IsExpectedMsi(temporary, canonicalVersion, out var packageError))
         {
             File.Delete(temporary);
             throw new InvalidDataException(packageError);
@@ -376,21 +377,25 @@ public sealed class UpdateService(HttpClient? httpClient = null)
     }
 
     // relaunchPath: started again once Windows Installer has finished (or was canceled).
-    public Process StartInstaller(string installerPath, string? relaunchPath = null)
+    public Process StartInstaller(string installerPath, string? relaunchPath = null, string? verifiedSha256 = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(installerPath);
         if (Path.GetExtension(installerPath).Equals(".msi", StringComparison.OrdinalIgnoreCase))
         {
-            var log = Path.Combine(Path.GetDirectoryName(installerPath)!, "install.log");
-            var install = $"start \"\" /wait msiexec.exe /i \"{installerPath}\" /passive /norestart /l*v \"{log}\"";
-            // The installer is not needed once Windows Installer has finished, whether it succeeded or not.
-            install += $" & del /f /q \"{installerPath}\"";
-            var command = string.IsNullOrWhiteSpace(relaunchPath) ? install : $"{install} & start \"\" \"{relaunchPath}\"";
-            return Process.Start(new ProcessStartInfo("cmd.exe", $"/d /c {command}")
+            string powerShell = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+            var start = new ProcessStartInfo(powerShell)
             {
                 UseShellExecute = false,
                 CreateNoWindow = true
-            }) ?? throw new InvalidOperationException("Windows Installer could not be started.");
+            };
+            start.ArgumentList.Add("-NoProfile");
+            start.ArgumentList.Add("-NonInteractive");
+            start.ArgumentList.Add("-EncodedCommand");
+            start.ArgumentList.Add(Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(BuildMsiRunnerScript())));
+            start.Environment["DISKLOOM_UPDATE_INSTALLER"] = Path.GetFullPath(installerPath);
+            start.Environment["DISKLOOM_UPDATE_RELAUNCH"] = relaunchPath ?? string.Empty;
+            start.Environment["DISKLOOM_UPDATE_SHA256"] = verifiedSha256 is null ? string.Empty : NormalizeFingerprint(verifiedSha256);
+            return Process.Start(start) ?? throw new InvalidOperationException("Windows Installer could not be started.");
         }
 
         return Process.Start(new ProcessStartInfo(installerPath, "/update")
@@ -398,6 +403,49 @@ public sealed class UpdateService(HttpClient? httpClient = null)
             UseShellExecute = true
         }) ?? throw new InvalidOperationException("The update installer could not be started.");
     }
+
+    internal static string CanonicalizeVersion(string version)
+    {
+        if (string.IsNullOrEmpty(version) ||
+            version.Length != version.Trim().Length ||
+            version.IndexOfAny(['\\', '/', ':']) >= 0 ||
+            !Version.TryParse(version, out var parsed) ||
+            parsed.Major < 0 || parsed.Minor < 0)
+        {
+            throw new InvalidDataException($"The update manifest contains an invalid version: {version}");
+        }
+
+        return parsed.Revision > 0
+            ? parsed.ToString(4)
+            : parsed.Build >= 0
+                ? parsed.ToString(3)
+                : parsed.ToString(2);
+    }
+
+    internal static string BuildMsiRunnerScript() => """
+        $ErrorActionPreference = 'Stop'
+        $msi = $env:DISKLOOM_UPDATE_INSTALLER
+        $log = [IO.Path]::Combine([IO.Path]::GetDirectoryName($msi), 'install.log')
+        $msiexec = [IO.Path]::Combine([Environment]::SystemDirectory, 'msiexec.exe')
+        try {
+            $file = [IO.File]::Open($msi, 'Open', 'Read', 'Read')
+            try {
+                if ($env:DISKLOOM_UPDATE_SHA256) {
+                    $hash = Get-FileHash -InputStream $file -Algorithm SHA256
+                    if ($hash.Hash -cne $env:DISKLOOM_UPDATE_SHA256) { throw 'The staged installer changed.' }
+                }
+                $quotedMsi = '"' + $msi.Replace('"', '') + '"'
+                $quotedLog = '"' + $log.Replace('"', '') + '"'
+                $arguments = "/i $quotedMsi /passive /norestart /l*v $quotedLog"
+                $null = Start-Process -FilePath $msiexec -ArgumentList $arguments -Wait -PassThru
+            } finally {
+                $file.Dispose()
+            }
+        } finally {
+            Remove-Item -LiteralPath $msi -Force -ErrorAction SilentlyContinue
+            if ($env:DISKLOOM_UPDATE_RELAUNCH) { Start-Process -FilePath $env:DISKLOOM_UPDATE_RELAUNCH }
+        }
+        """;
 
     private static string NormalizeFingerprint(string value) => value.Replace(" ", string.Empty, StringComparison.Ordinal).ToUpperInvariant();
 

@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using DiskLoom.Core.Models;
 using Microsoft.Win32.SafeHandles;
 
 namespace DiskLoom.Core.Services;
@@ -14,6 +15,7 @@ internal readonly record struct FileState(long Size, DateTime LastWriteUtc, Date
     private const uint FileFlagBackupSemantics = 0x02000000;
     private const int FileBasicInfoClass = 0;
     private const int FileStandardInfoClass = 1;
+    private const int FileIdInfoClass = 18;
 
     public static FileState? Read(string path)
     {
@@ -29,25 +31,51 @@ internal readonly record struct FileState(long Size, DateTime LastWriteUtc, Date
             return null;
         }
 
-        // File systems without a change time (FAT, for example) report zero.
-        return new FileState(
-            standard.EndOfFile,
-            DateTime.FromFileTimeUtc(basic.LastWriteTime),
-            basic.ChangeTime == 0 ? null : DateTime.FromFileTimeUtc(basic.ChangeTime),
-            standard.Directory != 0,
-            standard.DeletePending != 0);
-    }
-
-    // The volume serial number and file ID of a file or directory, after following any link to its final target.
-    // Two paths with the same identity are the same object on disk.
-    public static (uint VolumeSerialNumber, ulong FileId)? ReadIdentity(string path)
-    {
-        using var handle = CreateFile(path, FileReadAttributes, FileShareAll, 0, OpenExisting, FileFlagBackupSemantics, 0);
-        if (handle.IsInvalid || !GetFileInformationByHandle(handle, out var info))
+        try
+        {
+            // File systems without a change time (FAT, for example) report zero.
+            return new FileState(
+                standard.EndOfFile,
+                DateTime.FromFileTimeUtc(basic.LastWriteTime),
+                basic.ChangeTime == 0 ? null : DateTime.FromFileTimeUtc(basic.ChangeTime),
+                standard.Directory != 0,
+                standard.DeletePending != 0);
+        }
+        catch (ArgumentOutOfRangeException)
         {
             return null;
         }
-        return (info.VolumeSerialNumber, ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow);
+    }
+
+    // The volume serial number and 128-bit file ID of a file or directory, after following any link to its final target.
+    // Two paths with the same identity are the same object on disk.
+    public static FileIdentity? ReadIdentity(string path)
+    {
+        using var handle = CreateFile(path, FileReadAttributes, FileShareAll, 0, OpenExisting, FileFlagBackupSemantics, 0);
+        return handle.IsInvalid ? null : ReadIdentity(handle);
+    }
+
+    public static FileIdentity? ReadIdentity(SafeFileHandle handle)
+    {
+        if (GetFileInformationByHandleEx(handle, FileIdInfoClass, out FileIdInfo idInfo, (uint)Marshal.SizeOf<FileIdInfo>()))
+        {
+            return new FileIdentity(unchecked((uint)idInfo.VolumeSerialNumber), idInfo.FileIdLow, idInfo.FileIdHigh);
+        }
+
+        if (GetFileInformationByHandle(handle, out var info))
+        {
+            return new FileIdentity(info.VolumeSerialNumber, ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow, 0);
+        }
+
+        return null;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileIdInfo
+    {
+        public ulong VolumeSerialNumber;
+        public ulong FileIdLow;
+        public ulong FileIdHigh;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -103,4 +131,7 @@ internal readonly record struct FileState(long Size, DateTime LastWriteUtc, Date
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetFileInformationByHandleEx(SafeFileHandle file, int infoClass, out FileStandardInfo info, uint size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandleEx(SafeFileHandle file, int infoClass, out FileIdInfo info, uint size);
 }

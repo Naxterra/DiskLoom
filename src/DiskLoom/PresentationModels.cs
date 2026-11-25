@@ -3,9 +3,22 @@ using System.Runtime.CompilerServices;
 using DiskLoom.Core.Models;
 using DiskLoom.Core.Services;
 using DiskLoom.Services;
+using Microsoft.UI;
+using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Windows.UI;
 
 namespace DiskLoom;
+
+public sealed partial class SplitterGrid : Grid
+{
+    public SplitterGrid()
+    {
+        ProtectedCursor = InputSystemCursor.Create(InputSystemCursorShape.SizeWestEast);
+    }
+}
 
 public sealed record BreadcrumbSegment(string Label, string FullPath, ScanNode? Source)
 {
@@ -14,31 +27,34 @@ public sealed record BreadcrumbSegment(string Label, string FullPath, ScanNode? 
 
 public sealed class FolderTreeRow
 {
-    public FolderTreeRow(string fullPath, ScanNode? source, long parentSize = 0)
+    public FolderTreeRow(string fullPath, ScanNode? source, long parentSize = 0, bool displayAllocated = false)
     {
         Source = source;
         FullPath = fullPath;
         Name = source?.Name ?? FormatName(fullPath);
         ParentSize = parentSize;
+        DisplayAllocated = displayAllocated;
     }
 
-    public FolderTreeRow(DriveSummary drive, ScanNode? source)
+    public FolderTreeRow(DriveSummary drive, ScanNode? source, bool displayAllocated = false)
     {
         Drive = drive;
         Source = source;
         FullPath = drive.Name;
         Name = drive.DisplayName;
+        DisplayAllocated = displayAllocated;
     }
 
     public DriveSummary? Drive { get; }
     public ScanNode? Source { get; }
     // Size of the folder above this one in the scan; 0 when it was not scanned.
     public long ParentSize { get; }
+    public bool DisplayAllocated { get; }
     public string FullPath { get; }
     public string Name { get; }
     public string Glyph => Drive is null ? "\uE8B7" : "\uE7F1";
     public string PrimarySizeText => Source is not null
-        ? ByteFormatter.Format(Source.Size)
+        ? ByteFormatter.Format(DisplayAllocated ? Source.AllocatedSize : Source.Size)
         : Drive is { IsReady: true }
             ? ByteFormatter.Format(Drive.UsedBytes)
             : Drive is null
@@ -49,7 +65,7 @@ public sealed class FolderTreeRow
     public double Percent => Drive is { IsReady: true, TotalBytes: > 0 }
         ? Math.Clamp(Drive.UsedPercentage, 0, 100)
         : Source is not null && ParentSize > 0
-            ? Math.Clamp(Source.Size * 100d / ParentSize, 0, 100)
+            ? Math.Clamp((DisplayAllocated ? Source.AllocatedSize : Source.Size) * 100d / ParentSize, 0, 100)
             : 0;
 
     public Visibility BarVisibility => Drive is { IsReady: true, TotalBytes: > 0 } || (Source is not null && ParentSize > 0)
@@ -174,6 +190,69 @@ public sealed class ResultColumnLayout : INotifyPropertyChanged
         }
     }
 
+    public GridLength Get(ResultColumnKey key) => key switch
+    {
+        ResultColumnKey.Name => NameWidth,
+        ResultColumnKey.Size => SizeWidth,
+        ResultColumnKey.Allocated => AllocatedWidth,
+        ResultColumnKey.Modified => ModifiedWidth,
+        ResultColumnKey.Percent => PercentWidth,
+        ResultColumnKey.Files => FilesWidth,
+        ResultColumnKey.Folders => FoldersWidth,
+        ResultColumnKey.Created => CreatedWidth,
+        ResultColumnKey.Accessed => AccessedWidth,
+        ResultColumnKey.Type => TypeWidth,
+        _ => AttributesWidth
+    };
+
+    public Dictionary<string, double> SaveWidths()
+    {
+        var saved = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        foreach (var column in ResultColumns.All)
+        {
+            var length = Get(column.Key);
+            if (length.GridUnitType == GridUnitType.Pixel && length.Value >= column.MinWidth)
+            {
+                saved[column.Key.ToString()] = length.Value;
+            }
+        }
+        return saved;
+    }
+
+    public void LoadWidths(IReadOnlyDictionary<string, double>? widths)
+    {
+        if (widths is null)
+        {
+            return;
+        }
+        foreach (var (name, width) in widths)
+        {
+            if (Enum.TryParse<ResultColumnKey>(name, ignoreCase: true, out var key) && double.IsFinite(width))
+            {
+                var column = ResultColumns.Get(key);
+                if (width >= column.MinWidth)
+                {
+                    Set(key, new GridLength(width));
+                }
+            }
+        }
+    }
+
+    public void Reset()
+    {
+        NameWidth = new GridLength(1.4, GridUnitType.Star);
+        SizeWidth = new GridLength(1, GridUnitType.Star);
+        AllocatedWidth = new GridLength(1, GridUnitType.Star);
+        ModifiedWidth = new GridLength(1.2, GridUnitType.Star);
+        PercentWidth = new GridLength(1.1, GridUnitType.Star);
+        FilesWidth = new GridLength(0.8, GridUnitType.Star);
+        FoldersWidth = new GridLength(0.8, GridUnitType.Star);
+        CreatedWidth = new GridLength(1.2, GridUnitType.Star);
+        AccessedWidth = new GridLength(1.2, GridUnitType.Star);
+        TypeWidth = new GridLength(0.8, GridUnitType.Star);
+        AttributesWidth = new GridLength(0.7, GridUnitType.Star);
+    }
+
     private void Set(ref GridLength field, GridLength value, [CallerMemberName] string? propertyName = null)
     {
         if (field.Equals(value))
@@ -202,6 +281,8 @@ public sealed class NodeRow(
 {
     public event PropertyChangedEventHandler? PropertyChanged;
 
+    private bool _displayAllocated = displayAllocated;
+
     public ScanNode Source { get; private set; } = source;
     public bool IsLive { get; } = isLive;
     // Live rows are still growing; deleting or moving them would race the running scan.
@@ -212,7 +293,7 @@ public sealed class NodeRow(
     public string Path => Source.FullPath;
     public string Glyph => Source.IsDirectory ? "\uE8B7" : "\uE7C3";
     public string Kind => Source.IsDirectory ? LocalizationService.Get("Folder") : (string.IsNullOrEmpty(Source.Extension) ? LocalizationService.Get("File") : Source.Extension);
-    public long DisplaySize => displayAllocated ? Source.AllocatedSize : Source.Size;
+    public long DisplaySize => _displayAllocated ? Source.AllocatedSize : Source.Size;
     public string PrimarySizeText => ByteFormatter.Format(DisplaySize);
     public string SizeText => ByteFormatter.Format(Source.Size);
     public string AllocatedText => ByteFormatter.Format(Source.AllocatedSize);
@@ -222,17 +303,24 @@ public sealed class NodeRow(
     public string AccessedText => FormatDate(Source.LastAccessUtc);
     public string FileCountText => Source.IsDirectory ? Source.FileCount.ToString("N0") : string.Empty;
     public string FolderCountText => Source.IsDirectory ? Source.FolderCount.ToString("N0") : string.Empty;
-    public double PercentOfParent => ParentSize <= 0 ? 0 : Math.Clamp(Source.Size * 100d / ParentSize, 0, 100);
+    public double PercentOfParent => ParentSize <= 0 ? 0 : Math.Clamp(DisplaySize * 100d / ParentSize, 0, 100);
     public string PercentText => ParentSize <= 0 ? "—" : $"{PercentOfParent.ToString("0.0", System.Globalization.CultureInfo.CurrentCulture)} %";
     public string AttributesText => FormatAttributes(Source.Attributes);
 
-    internal void Update(ScanNode source, long parentSize)
+    internal void Update(ScanNode source, long parentSize, bool? displayAllocated = null)
     {
         Source = source;
         ParentSize = parentSize;
+        if (displayAllocated is { } allocated)
+        {
+            _displayAllocated = allocated;
+        }
         // An empty property name tells every binding on the row to refresh.
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(string.Empty));
     }
+
+    internal void Refresh() =>
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(string.Empty));
 
     private static string FormatDate(DateTimeOffset value) => value == default ? "—" : value.LocalDateTime.ToString("g");
 
@@ -252,18 +340,22 @@ public sealed class NodeRow(
     }
 }
 
-public sealed class ExtensionRow(ExtensionStatistic statistic)
+public sealed class ExtensionRow(ExtensionStatistic statistic, bool displayAllocated = false, long totalAllocated = 0)
 {
+    public string RawExtension { get; } = statistic.Extension;
     public string Extension { get; } = statistic.Extension == "(no extension)" ? LocalizationService.Get("NoExtension") : statistic.Extension;
-    public string SizeText { get; } = ByteFormatter.Format(statistic.Size);
+    public string SizeText { get; } = ByteFormatter.Format(displayAllocated ? statistic.AllocatedSize : statistic.Size);
     public string AllocatedText { get; } = ByteFormatter.Format(statistic.AllocatedSize);
     public string CountText { get; } = statistic.FileCount.ToString("N0");
-    public string PercentageText { get; } = $"{statistic.Percentage:0.#}%";
-    public double Percentage { get; } = statistic.Percentage;
+    public double Percentage { get; } = displayAllocated
+        ? (totalAllocated > 0 ? Math.Clamp(statistic.AllocatedSize * 100d / totalAllocated, 0, 100) : 0)
+        : statistic.Percentage;
+    public string PercentageText { get; } = $"{(displayAllocated ? (totalAllocated > 0 ? Math.Clamp(statistic.AllocatedSize * 100d / totalAllocated, 0, 100) : 0) : statistic.Percentage):0.#}%";
 }
 
 public sealed class AgeRow(AgeStatistic statistic)
 {
+    public string RawLabel { get; } = statistic.Label;
     public string Label { get; } = LocalizeAge(statistic.Label);
     public string SizeText { get; } = ByteFormatter.Format(statistic.Size);
     public string CountText { get; } = LocalizationService.Format("FilesCount", statistic.FileCount);
@@ -281,6 +373,9 @@ public sealed class AgeRow(AgeStatistic statistic)
 
 public sealed class DuplicateRow(int groupNumber, DuplicateGroup group, DuplicateFile file) : IFileActionRow
 {
+    private static readonly Brush EvenGroupBrush = new SolidColorBrush(Colors.Transparent);
+    private static readonly Brush OddGroupBrush = new SolidColorBrush(Color.FromArgb(18, 128, 140, 160));
+
     public int GroupNumber { get; } = groupNumber;
     public bool CanDelete => true;
     public DuplicateGroup Group { get; } = group;
@@ -290,6 +385,7 @@ public sealed class DuplicateRow(int groupNumber, DuplicateGroup group, Duplicat
     public string SizeText => ByteFormatter.Format(File.Size);
     public string ReclaimableText => ByteFormatter.Format(Group.ReclaimableSize);
     public string ModifiedText => File.LastWriteUtc.LocalDateTime.ToString("g");
+    public Brush GroupBackground => (GroupNumber & 1) == 0 ? EvenGroupBrush : OddGroupBrush;
 }
 
 public sealed class InsightRow(StorageInsight insight) : IFileActionRow
@@ -322,7 +418,7 @@ public sealed class InsightRow(StorageInsight insight) : IFileActionRow
     };
 }
 
-public sealed class ChangeRow(SnapshotChange change)
+public sealed class ChangeRow(SnapshotChange change, string scanRootPath = "")
 {
     public SnapshotChange Change { get; } = change;
     public string Kind => LocalizationService.Get(Change.Kind switch
@@ -333,6 +429,11 @@ public sealed class ChangeRow(SnapshotChange change)
         _ => "ChangeUnchanged"
     });
     public string Path => Change.RelativePath;
+    public string FullPath => string.IsNullOrWhiteSpace(scanRootPath)
+        ? Change.RelativePath
+        : Change.RelativePath == "."
+            ? scanRootPath
+            : System.IO.Path.Combine(scanRootPath, Change.RelativePath);
     public string OldSize => ByteFormatter.Format(Change.OldSize);
     public string NewSize => ByteFormatter.Format(Change.NewSize);
     public string Delta => $"{(Change.SizeDelta >= 0 ? "+" : "−")}{ByteFormatter.Format(Math.Abs(Change.SizeDelta))}";

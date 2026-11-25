@@ -22,13 +22,32 @@ public sealed class DuplicateFinder
         IEnumerable<string> remainingPaths,
         IEnumerable<string> deletingPaths)
     {
-        var remaining = remainingPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var deleting = deletingPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        return groups
+        var groupList = groups as IReadOnlyCollection<DuplicateGroup> ?? groups.ToArray();
+        var comparer = HasCaseCollisions(groupList) ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
+        var remaining = remainingPaths.ToHashSet(comparer);
+        var deleting = deletingPaths.ToHashSet(comparer);
+        return groupList
             .Where(group =>
                 group.Files.Any(file => deleting.Contains(file.Path)) &&
                 !group.Files.Any(file => remaining.Contains(file.Path) && !deleting.Contains(file.Path) && IsUnchanged(file)))
             .ToArray();
+    }
+
+    private static bool HasCaseCollisions(IEnumerable<DuplicateGroup> groups)
+    {
+        var byIgnoreCase = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var group in groups)
+        {
+            foreach (var file in group.Files)
+            {
+                if (byIgnoreCase.TryGetValue(file.Path, out var existing) && !string.Equals(existing, file.Path, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+                byIgnoreCase[file.Path] = file.Path;
+            }
+        }
+        return false;
     }
 
     public async Task<DuplicateResult> FindAsync(
@@ -41,11 +60,8 @@ public sealed class DuplicateFinder
         var sized = root.Files().Where(file => file.Size >= minimumFileSize).ToArray();
         var skippedCloudFiles = sized.LongCount(IsCloudOnly);
         var candidates = sized
-            .Where(static file => !IsCloudOnly(file))
-            .GroupBy(static file => file.FileId == 0
-                    ? $"PATH:{file.FullPath}"
-                    : $"ID:{file.VolumeSerialNumber:X8}:{file.FileId:X16}",
-                StringComparer.OrdinalIgnoreCase)
+            .Where(static file => !IsCloudOnly(file) && !IsNonCloudReparsePoint(file))
+            .GroupBy(static file => file, CandidateIdentityComparer.Instance)
             .Select(static group => group.First())
             .GroupBy(static file => file.Size)
             .Where(static group => group.Skip(1).Any())
@@ -212,5 +228,35 @@ public sealed class DuplicateFinder
 
         hash.AppendData(BitConverter.GetBytes(length));
         return Convert.ToHexString(hash.GetHashAndReset());
+    }
+
+    private static bool IsNonCloudReparsePoint(ScanNode file) =>
+        (file.Attributes & FileAttributes.ReparsePoint) != 0 && !FileSystemScanner.IsCloudPlaceholder(file.ReparsePointTag);
+
+    private sealed class CandidateIdentityComparer : IEqualityComparer<ScanNode>
+    {
+        public static readonly CandidateIdentityComparer Instance = new();
+
+        public bool Equals(ScanNode? x, ScanNode? y)
+        {
+            if (ReferenceEquals(x, y))
+            {
+                return true;
+            }
+            if (x is null || y is null)
+            {
+                return false;
+            }
+            if (x.Identity.HasIdentity || y.Identity.HasIdentity)
+            {
+                return x.Identity == y.Identity;
+            }
+            return string.Equals(x.FullPath, y.FullPath, StringComparison.OrdinalIgnoreCase);
+        }
+
+        public int GetHashCode(ScanNode obj) =>
+            obj.Identity.HasIdentity
+                ? obj.Identity.GetHashCode()
+                : StringComparer.OrdinalIgnoreCase.GetHashCode(obj.FullPath);
     }
 }

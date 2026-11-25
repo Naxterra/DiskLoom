@@ -18,6 +18,12 @@ public static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        // The elevated deletion process never starts the normal app or redirects to its instance.
+        if (args.Length > 0 && args[0] == AdministratorDeletion.Switch)
+        {
+            return AdministratorDeletion.Run(args[1..]);
+        }
+
         WinRT.ComWrappersSupport.InitializeComWrappers();
         if (RedirectToExistingInstance())
         {

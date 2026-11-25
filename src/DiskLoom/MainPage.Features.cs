@@ -9,7 +9,6 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using Windows.Foundation;
-using Windows.Storage.Pickers;
 using Windows.System;
 using Windows.UI;
 
@@ -36,6 +35,10 @@ public sealed partial class MainPage
     private bool _exportAllLevels;
     private bool _exportIncludeFiles = true;
     private bool _exportCurrentFolder;
+    private bool _displayAllocated;
+    private bool _isDialogOpen;
+    private ScanSnapshot? _comparedSnapshot;
+    private ScanNode? _treemapTargetNode;
 
     private enum ExportFormat
     {
@@ -107,6 +110,7 @@ public sealed partial class MainPage
                     break;
                 case Thumb splitter:
                     splitter.DragDelta += ResultColumnSplitter_DragDelta;
+                    splitter.DragCompleted += (_, _) => SaveLayoutSettings();
                     splitter.DoubleTapped += ResultColumnSplitter_DoubleTapped;
                     ToolTipService.SetToolTip(splitter, resizeTip);
                     Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(splitter, resizeTip);
@@ -117,6 +121,7 @@ public sealed partial class MainPage
         ResultHeaderHost.Child = header;
         ChildrenList.ItemTemplate = ResultColumns.CreateRowTemplate(columns);
         UpdateSortIndicators();
+        ScheduleHeaderScrollbarSync();
     }
 
     private MenuFlyout CreateColumnsMenu()
@@ -144,7 +149,12 @@ public sealed partial class MainPage
         customize.Click += CustomizeColumns_Click;
         menu.Items.Add(customize);
         var reset = new MenuFlyoutItem { Text = LocalizationService.Get("ResetColumnsMenu") };
-        reset.Click += (_, _) => SetResultColumns(ResultColumns.Default);
+        reset.Click += (_, _) =>
+        {
+            ResultColumnWidths.Reset();
+            SetResultColumns(ResultColumns.Default);
+            SaveLayoutSettings();
+        };
         menu.Items.Add(reset);
         return menu;
     }
@@ -219,13 +229,15 @@ public sealed partial class MainPage
             }
         };
 
-        switch (await dialog.ShowAsync())
+        switch (await ShowDialogAsync(dialog))
         {
             case ContentDialogResult.Primary:
                 SetResultColumns(choices.Where(static choice => choice.IsVisible).Select(static choice => choice.Key).ToArray());
                 break;
             case ContentDialogResult.Secondary:
+                ResultColumnWidths.Reset();
                 SetResultColumns(ResultColumns.Default);
+                SaveLayoutSettings();
                 break;
         }
     }
@@ -236,15 +248,15 @@ public sealed partial class MainPage
     {
         _liveTopLevel = topLevel;
         // Shares are of everything found so far, so they add up to 100 % at every moment.
-        var total = topLevel.Sum(static node => node.Size);
-        const bool displayAllocated = DisplayAllocatedMeasurements;
+        var displayAllocated = _displayAllocated;
+        var total = topLevel.Sum(node => GetMeasure(node, displayAllocated));
         var rows = SortNodes(FilterByQuery(topLevel))
             .Take(5_000)
             .Select(node =>
             {
                 if (_liveRows.TryGetValue(node.FullPath, out var row))
                 {
-                    row.Update(node, total);
+                    row.Update(node, total, displayAllocated);
                     return row;
                 }
                 row = new NodeRow(node, displayAllocated, ResultColumnWidths, total, isLive: true);
@@ -257,6 +269,7 @@ public sealed partial class MainPage
         if (ChildrenList.ItemsSource is not NodeRow[] current || !current.SequenceEqual(rows))
         {
             ChildrenList.ItemsSource = rows;
+            ScheduleHeaderScrollbarSync();
         }
         AllocatedSizeText.Text = ByteFormatter.Format(topLevel.Sum(static node => node.AllocatedSize));
         TreeCountText.Text = LocalizationService.Format("LiveCount", topLevel.Count);
@@ -466,7 +479,7 @@ public sealed partial class MainPage
                 return;
             }
 
-            const bool displayAllocated = DisplayAllocatedMeasurements;
+            var displayAllocated = _displayAllocated;
             SearchResultsList.ItemsSource = found.Matches
                 .Where(node => !IsDeletedPath(node.FullPath))
                 .Select(node => new NodeRow(node, displayAllocated))
@@ -550,14 +563,15 @@ public sealed partial class MainPage
         }
 
         var kind = (BreakdownKind)Math.Max(0, ChartKindBox.SelectedIndex);
+        var useAllocated = _displayAllocated;
         var requestId = Interlocked.Increment(ref _chartRequestId);
         IReadOnlyList<BreakdownSlice> slices;
         try
         {
             // Subfolders are already summed; the other breakdowns walk every file below the folder.
             slices = kind == BreakdownKind.Children
-                ? FolderBreakdown.Create(folder, kind, ChartSliceLimit, DateTimeOffset.UtcNow)
-                : await ReadScanAsync(() => FolderBreakdown.Create(folder, kind, ChartSliceLimit, DateTimeOffset.UtcNow));
+                ? FolderBreakdown.Create(folder, kind, ChartSliceLimit, DateTimeOffset.UtcNow, useAllocated: useAllocated)
+                : await ReadScanAsync(() => FolderBreakdown.Create(folder, kind, ChartSliceLimit, DateTimeOffset.UtcNow, useAllocated: useAllocated));
         }
         catch (Exception exception)
         {
@@ -822,6 +836,7 @@ public sealed partial class MainPage
             if (ReferenceEquals(_treeFilter, filter))
             {
                 DisplayPresentation(view, _currentNode?.FullPath);
+                RefreshDerivedViewsAfterEdit(updatedBase.Result);
             }
             else
             {
@@ -837,9 +852,38 @@ public sealed partial class MainPage
             _scanEditLock.Release();
         }
 
+        RefreshDrives();
         if (reapplyFilter)
         {
             await ApplyTreeFilterAsync(_treeFilter);
+        }
+    }
+
+    private void RefreshDerivedViewsAfterEdit(ScanResult updatedBase)
+    {
+        if (SearchResultsList.ItemsSource is IEnumerable<NodeRow> searchRows)
+        {
+            var remaining = new List<NodeRow>();
+            foreach (var row in searchRows)
+            {
+                if (IsDeletedPath(row.Path))
+                {
+                    continue;
+                }
+                if (row.Source.IsDirectory && _nodesByPath.TryGetValue(row.Path, out var updatedNode))
+                {
+                    row.Update(updatedNode, 0, _displayAllocated);
+                }
+                remaining.Add(row);
+            }
+            SearchResultsList.ItemsSource = remaining.ToArray();
+        }
+
+        if (_comparedSnapshot is { } compared && PathsEqual(compared.RootPath, updatedBase.Root.FullPath))
+        {
+            var changes = _snapshotService.Compare(compared, _snapshotService.Create(updatedBase));
+            ChangesList.ItemsSource = changes.Select(change => new ChangeRow(change, updatedBase.Root.FullPath)).ToArray();
+            ChangesHeaderText.Text = LocalizationService.Format("ChangesSince", changes.Count, compared.CreatedUtc.LocalDateTime, compared.RootPath);
         }
     }
 
@@ -895,8 +939,8 @@ public sealed partial class MainPage
     {
         var stale = _scanCache
             .Where(entry => !ReferenceEquals(entry.Value, _basePresentation) &&
-                            removedPaths.Any(path => IsSameOrInside(path, entry.Value.Result.Root.FullPath) ||
-                                                     IsSameOrInside(entry.Value.Result.Root.FullPath, path)))
+                            removedPaths.Any(path => ScanPaths.IsSameOrInside(path, entry.Value.Result.Root.FullPath) ||
+                                                     ScanPaths.IsSameOrInside(entry.Value.Result.Root.FullPath, path)))
             .Select(static entry => entry.Key)
             .ToArray();
         foreach (var key in stale)
@@ -1000,6 +1044,8 @@ public sealed partial class MainPage
         DuplicateSummaryText.Text = _duplicateSkippedCloudFiles > 0
             ? $"{summary} · {LocalizationService.Format("DuplicateSkippedCloud", _duplicateSkippedCloudFiles)}"
             : summary;
+        DuplicateSelectButton.IsEnabled = rows.Count > 0;
+        ShowDuplicateButton.IsEnabled = DuplicatesList.SelectedItems.Count > 0;
     }
 
     // ---- Copy / move -----------------------------------------------------------------------
@@ -1047,29 +1093,43 @@ public sealed partial class MainPage
             return;
         }
 
-        var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.ComputerFolder };
-        picker.FileTypeFilter.Add("*");
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, App.WindowHandle);
-        var folder = await picker.PickSingleFolderAsync();
-        if (folder is null)
+        var destination = NativeFileDialogs.PickFolder(App.WindowHandle);
+        if (string.IsNullOrWhiteSpace(destination))
         {
             return;
         }
 
-        var destination = folder.Path;
-        if (sources.Any(source => IsSameOrInside(destination, source)))
+        if (RefuseTrimmedNames(new[] { destination }))
+        {
+            return;
+        }
+        if (sources.Any(source => ScanPaths.IsSameOrInside(destination, source)))
         {
             ShowNotification(LocalizationService.Get("TransferIntoItself"), InfoBarSeverity.Warning);
             return;
         }
-        if (move && sources.All(source => PathsEqual(System.IO.Path.GetDirectoryName(source), destination)))
+        if (move && sources.All(source => PathsEqual(ScanPaths.GetParent(source), destination)))
         {
             ShowNotification(LocalizationService.Get("TransferSameFolder"), InfoBarSeverity.Informational);
             return;
         }
+        if (move)
+        {
+            if (sources.Any(WindowsPaths.IsVolumeRoot))
+            {
+                ShowNotification(LocalizationService.Get("VolumeRootMoveRefused"), InfoBarSeverity.Warning);
+                return;
+            }
+            var nestedMount = await Task.Run(() => sources.Select(WindowsPaths.FindContainedVolumeRoot).FirstOrDefault(static item => item is not null));
+            if (nestedMount is not null)
+            {
+                ShowNotification(LocalizationService.Format("NestedVolumeMoveRefused", nestedMount), InfoBarSeverity.Warning);
+                return;
+            }
+        }
 
         var scanRoot = (_basePresentation?.Result ?? _scanResult)?.Root.FullPath;
-        var landsInScan = scanRoot is not null && IsSameOrInside(destination, scanRoot);
+        var landsInScan = scanRoot is not null && ScanPaths.IsSameOrInside(destination, scanRoot);
         var handoff = await NaxCopyHandoff.TrySendAsync(move ? NaxCopyOperation.Move : NaxCopyOperation.Copy, destination, sources);
         if (handoff != NaxCopyHandoffResult.NotDelivered)
         {
@@ -1094,7 +1154,7 @@ public sealed partial class MainPage
                 ? await _fileOperations.MoveAsync(sources, destination, App.WindowHandle)
                 : await _fileOperations.CopyAsync(sources, destination, App.WindowHandle);
             var gone = move
-                ? sources.Where(static source => !File.Exists(source) && !Directory.Exists(source)).ToArray()
+                ? sources.Where(static source => !File.Exists(WindowsPaths.ToExtended(source)) && !Directory.Exists(WindowsPaths.ToExtended(source))).ToArray()
                 : [];
 
             if (result.Succeeded)
@@ -1115,6 +1175,7 @@ public sealed partial class MainPage
             {
                 await afterMove(gone);
             }
+            RefreshDrives();
         }
         catch (Exception exception)
         {
@@ -1126,35 +1187,40 @@ public sealed partial class MainPage
         }
     }
 
-    // Nax-Copy moves in the background: once every moved item is gone from its old place (checked every second, for up
-    // to six hours), update the view as after a move with Explorer's engine — unless another scan has replaced this one.
+    // Nax-Copy moves in the background: detach items incrementally as they disappear from their old place
+    // (checked every second, for up to six hours), unless another scan has replaced this one.
     private async Task ApplyWhenMovedAsync(IReadOnlyList<string> sources, Func<IReadOnlyList<string>, Task> afterMove)
     {
-        // Deleting, moving or filtering replaces the scan result object but keeps its root folder; only a new scan
-        // changes the root, and then the moved items are no longer part of what is shown.
         var root = CurrentScanRoot;
+        var pending = new HashSet<string>(sources, StringComparer.OrdinalIgnoreCase);
         var deadline = DateTime.UtcNow.AddHours(6);
-        while (DateTime.UtcNow < deadline && sources.Any(static source => File.Exists(source) || Directory.Exists(source)))
+        while (pending.Count > 0 && DateTime.UtcNow < deadline)
         {
+            var goneNow = pending
+                .Where(static source => !File.Exists(WindowsPaths.ToExtended(source)) && !Directory.Exists(WindowsPaths.ToExtended(source)))
+                .ToArray();
+            if (goneNow.Length > 0)
+            {
+                foreach (var path in goneNow)
+                {
+                    pending.Remove(path);
+                }
+                if (!ReferenceEquals(root, CurrentScanRoot))
+                {
+                    return;
+                }
+                await afterMove(goneNow);
+            }
+            if (pending.Count == 0)
+            {
+                break;
+            }
             await Task.Delay(TimeSpan.FromSeconds(1));
             if (!ReferenceEquals(root, CurrentScanRoot))
             {
                 return;
             }
         }
-        var gone = sources.Where(static source => !File.Exists(source) && !Directory.Exists(source)).ToArray();
-        if (gone.Length > 0 && ReferenceEquals(root, CurrentScanRoot))
-        {
-            await afterMove(gone);
-        }
-    }
-
-    private static bool IsSameOrInside(string path, string folder)
-    {
-        var fullPath = System.IO.Path.GetFullPath(path).TrimEnd('\\', '/');
-        var fullFolder = System.IO.Path.GetFullPath(folder).TrimEnd('\\', '/');
-        return fullPath.Equals(fullFolder, StringComparison.OrdinalIgnoreCase) ||
-               fullPath.StartsWith(fullFolder + "\\", StringComparison.OrdinalIgnoreCase);
     }
 
     // ---- Export ----------------------------------------------------------------------------
@@ -1231,7 +1297,7 @@ public sealed partial class MainPage
                 Children = { formatBox, scopeBox, depthBox, allLevelsBox, includeFilesBox, hint }
             }
         };
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary)
         {
             return;
         }
@@ -1260,25 +1326,19 @@ public sealed partial class MainPage
             ExportFormat.Pdf => ("FilePdf", ".pdf"),
             _ => ("FileCsv", ".csv")
         };
-        var picker = new FileSavePicker
-        {
-            SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
-            SuggestedFileName = $"DiskLoom-{SanitizeFileName(root.Name)}-{DateTime.Now:yyyyMMdd-HHmm}"
-        };
-        picker.FileTypeChoices.Add(LocalizationService.Get(typeResource), [extension]);
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, App.WindowHandle);
-        var file = await picker.PickSaveFileAsync();
-        if (file is null)
+        var suggested = $"DiskLoom-{SanitizeFileName(root.Name)}-{DateTime.Now:yyyyMMdd-HHmm}";
+        var path = NativeFileDialogs.PickSaveFile(App.WindowHandle, suggested, LocalizationService.Get(typeResource), extension);
+        if (string.IsNullOrWhiteSpace(path))
         {
             return;
         }
 
-        var path = file.Path;
         var text = CreateReportText();
         var culture = System.Globalization.CultureInfo.CurrentCulture;
         SetBusy(true, LocalizationService.Get("Exporting"));
-        // The whole export reads the scan tree; a deletion meanwhile waits so the file shows one consistent state.
+        // Hold the tree steady until it has been written to the selected format or the intermediate HTML.
         await _scanEditLock.WaitAsync();
+        var holdsScanLock = true;
         try
         {
             // A deletion or move may have changed the scan while the dialogs were open, so export its current state.
@@ -1318,10 +1378,12 @@ public sealed partial class MainPage
                     var htmlPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{PdfReportPrefix}{Guid.NewGuid():N}.html");
                     // WebView2 writes the PDF itself, so it prints to a temporary file that replaces an existing
                     // PDF only once it is complete.
-                    var pdfTemporary = AtomicFile.TemporaryPathFor(System.IO.Path.GetFullPath(path));
+                    var pdfTemporary = AtomicFile.TemporaryPathFor(path);
                     try
                     {
                         summary = await new ReportExportService().ExportHtmlAsync(exported, htmlPath, options, text, culture);
+                        _scanEditLock.Release();
+                        holdsScanLock = false;
                         await PdfReportPrinter.PrintAsync(htmlPath, pdfTemporary, $"{text.Title} – {root.FullPath}", App.WindowHandle);
                         AtomicFile.Replace(pdfTemporary, path);
                     }
@@ -1349,7 +1411,7 @@ public sealed partial class MainPage
         }
         finally
         {
-            _scanEditLock.Release();
+            if (holdsScanLock) _scanEditLock.Release();
             EndSideTask();
         }
     }
@@ -1421,5 +1483,536 @@ public sealed partial class MainPage
         {
             // A leftover temp file is harmless.
         }
+    }
+
+    // ---- Dialogs, layout persistence, size-on-disk toggle, shortcuts and drill-downs ----
+
+    private async Task<ContentDialogResult> ShowDialogAsync(ContentDialog dialog)
+    {
+        while (_isDialogOpen)
+        {
+            await Task.Delay(100);
+        }
+        _isDialogOpen = true;
+        try
+        {
+            return await dialog.ShowAsync();
+        }
+        finally
+        {
+            _isDialogOpen = false;
+        }
+    }
+
+    private async Task WaitForNoDialogAsync()
+    {
+        while (_isDialogOpen)
+        {
+            await Task.Delay(150);
+        }
+    }
+
+    private void SaveLayoutSettings()
+    {
+        App.Settings = App.Settings with
+        {
+            TreePaneWidth = TreePaneColumn.Width.GridUnitType == GridUnitType.Pixel ? TreePaneColumn.Width.Value : DefaultTreePaneWidth,
+            ColumnWidths = ResultColumnWidths.SaveWidths()
+        };
+        AppSettings.Save(App.Settings);
+    }
+
+    private void ChildrenList_SizeChanged(object sender, SizeChangedEventArgs e) => ScheduleHeaderScrollbarSync();
+
+    private void ScheduleHeaderScrollbarSync() => DispatcherQueue.TryEnqueue(UpdateResultHeaderScrollbarPadding);
+
+    private void UpdateResultHeaderScrollbarPadding()
+    {
+        if (ChildrenList.ActualWidth <= 0)
+        {
+            return;
+        }
+        var scrollViewer = FindVisualChild<ScrollViewer>(ChildrenList);
+        var scrollbarWidth = scrollViewer is not null && scrollViewer.ViewportWidth > 0
+            ? Math.Max(0, ChildrenList.ActualWidth - scrollViewer.ViewportWidth)
+            : 0;
+        ResultHeaderHost.Padding = new Thickness(0, 0, scrollbarWidth, 0);
+    }
+
+    private static T? FindVisualChild<T>(DependencyObject? parent) where T : DependencyObject
+    {
+        if (parent is null)
+        {
+            return null;
+        }
+        var count = VisualTreeHelper.GetChildrenCount(parent);
+        for (var index = 0; index < count; index++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, index);
+            if (child is T match)
+            {
+                return match;
+            }
+            if (FindVisualChild<T>(child) is { } nested)
+            {
+                return nested;
+            }
+        }
+        return null;
+    }
+
+    private void AllocatedMode_Click(object sender, RoutedEventArgs e) =>
+        ApplyDisplayAllocatedSetting(AllocatedModeButton.IsChecked == true);
+
+    private void ApplyDisplayAllocatedSetting(bool displayAllocated)
+    {
+        _displayAllocated = displayAllocated;
+        if (AllocatedModeButton.IsChecked != displayAllocated)
+        {
+            AllocatedModeButton.IsChecked = displayAllocated;
+        }
+        App.Settings = App.Settings with { DisplayAllocatedSize = displayAllocated };
+        AppSettings.Save(App.Settings);
+
+        if (_basePresentation is null || _scanResult is null)
+        {
+            return;
+        }
+
+        _basePresentation = CreatePresentation(_basePresentation.Result);
+        foreach (var key in _scanCache.Keys.ToArray())
+        {
+            var cached = _scanCache[key];
+            _scanCache[key] = ReferenceEquals(cached.Result, _basePresentation.Result)
+                ? _basePresentation
+                : CreatePresentation(cached.Result);
+        }
+        var currentPresentation = _treeFilter.IsEmpty
+            ? _basePresentation
+            : CreatePresentation(_scanResult);
+        DisplayPresentation(currentPresentation, _currentNode?.FullPath);
+        if (SearchResultsList.ItemsSource is IEnumerable<NodeRow> searchRows)
+        {
+            foreach (var row in searchRows)
+            {
+                row.Update(row.Source, row.ParentSize, _displayAllocated);
+            }
+        }
+    }
+
+    private void TypesAgeScopeBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loaded)
+        {
+            PopulateTypesAndAge();
+        }
+    }
+
+    private async void PopulateTypesAndAge()
+    {
+        if (_scanResult is not { } result)
+        {
+            ExtensionsList.ItemsSource = null;
+            AgeList.ItemsSource = null;
+            return;
+        }
+
+        var useCurrentFolder = TypesAgeScopeBox.SelectedIndex == 1 && _currentNode is not null && !ReferenceEquals(_currentNode, result.Root);
+        var target = useCurrentFolder ? _currentNode! : result.Root;
+        var useAllocated = _displayAllocated;
+
+        IReadOnlyList<ExtensionStatistic> extensions;
+        IReadOnlyList<AgeStatistic> ages;
+        if (!useCurrentFolder)
+        {
+            extensions = result.Extensions;
+            ages = result.Ages;
+        }
+        else
+        {
+            (extensions, ages) = await ReadScanAsync(() => ScanStatistics.Build(target, DateTimeOffset.UtcNow));
+            if (!ReferenceEquals(_scanResult, result) || !ReferenceEquals(_currentNode, target))
+            {
+                return;
+            }
+        }
+
+        var totalAllocated = Math.Max(1, target.AllocatedSize);
+        IEnumerable<ExtensionStatistic> orderedExtensions = useAllocated
+            ? extensions.OrderByDescending(static item => item.AllocatedSize)
+            : extensions;
+        ExtensionsList.ItemsSource = orderedExtensions
+            .Take(500)
+            .Select(item => new ExtensionRow(item, useAllocated, totalAllocated))
+            .ToArray();
+        if (useAllocated)
+        {
+            var allocatedTarget = useCurrentFolder ? target : result.Root;
+            var allocatedAges = await ReadScanAsync(() => BuildAllocatedAges(allocatedTarget, DateTimeOffset.UtcNow));
+            if (!ReferenceEquals(_scanResult, result) || (useCurrentFolder && !ReferenceEquals(_currentNode, target)))
+            {
+                return;
+            }
+            AgeList.ItemsSource = allocatedAges;
+        }
+        else
+        {
+            AgeList.ItemsSource = ages.Select(static item => new AgeRow(item)).ToArray();
+        }
+    }
+
+    private static AgeRow[] BuildAllocatedAges(ScanNode root, DateTimeOffset now)
+    {
+        var sizes = new long[ScanStatistics.AgeLabels.Count];
+        var counts = new long[ScanStatistics.AgeLabels.Count];
+        foreach (var file in root.Files())
+        {
+            var index = ScanStatistics.GetAgeBucket(now - file.LastWriteUtc);
+            sizes[index] += file.AllocatedSize;
+            counts[index]++;
+        }
+        return ScanStatistics.AgeLabels
+            .Select((label, index) => new AgeRow(new AgeStatistic(label, sizes[index], counts[index])))
+            .ToArray();
+    }
+
+    private async void ExtensionsList_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        if (ExtensionsList.SelectedItem is not ExtensionRow row || _scanResult is null)
+        {
+            return;
+        }
+
+        ResetSearchInputs();
+        SearchNameBox.Text = row.RawExtension == "(no extension)" ? "*." : $"*{row.RawExtension}";
+        SearchCurrentFolderBox.IsChecked = TypesAgeScopeBox.SelectedIndex == 1 && _currentNode is not null;
+        WorkspaceTabs.SelectedItem = SearchTab;
+        await RunSearchAsync();
+    }
+
+    private async void AgeList_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        if (AgeList.SelectedItem is not AgeRow row || _scanResult is null)
+        {
+            return;
+        }
+
+        ResetSearchInputs();
+        var today = DateTimeOffset.Now.Date;
+        switch (row.RawLabel)
+        {
+            case "Today":
+                SearchAfterPicker.Date = today;
+                break;
+            case "2–7 days":
+                SearchAfterPicker.Date = today.AddDays(-7);
+                SearchBeforePicker.Date = today.AddDays(-1);
+                break;
+            case "8–30 days":
+                SearchAfterPicker.Date = today.AddDays(-30);
+                SearchBeforePicker.Date = today.AddDays(-8);
+                break;
+            case "1–6 months":
+                SearchAfterPicker.Date = today.AddDays(-182);
+                SearchBeforePicker.Date = today.AddDays(-31);
+                break;
+            case "6–12 months":
+                SearchAfterPicker.Date = today.AddDays(-365);
+                SearchBeforePicker.Date = today.AddDays(-183);
+                break;
+            default:
+                SearchBeforePicker.Date = today.AddDays(-366);
+                break;
+        }
+        SearchCurrentFolderBox.IsChecked = TypesAgeScopeBox.SelectedIndex == 1 && _currentNode is not null;
+        WorkspaceTabs.SelectedItem = SearchTab;
+        await RunSearchAsync();
+    }
+
+    private void ResetSearchInputs()
+    {
+        SearchNameBox.Text = string.Empty;
+        SearchTypeBox.SelectedIndex = 0;
+        SearchKindBox.SelectedIndex = 0;
+        SearchMinSizeBox.Value = double.NaN;
+        SearchMaxSizeBox.Value = double.NaN;
+        SearchAfterPicker.Date = null;
+        SearchBeforePicker.Date = null;
+        SearchCurrentFolderBox.IsChecked = false;
+    }
+
+    private void DuplicatesList_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
+        ShowDuplicateButton.IsEnabled = DuplicatesList.SelectedItems.Count > 0;
+
+    private void DuplicateSelectKeepNewest_Click(object sender, RoutedEventArgs e) =>
+        SelectDuplicateCopies(keepNewest: true);
+
+    private void DuplicateSelectKeepOldest_Click(object sender, RoutedEventArgs e) =>
+        SelectDuplicateCopies(keepNewest: false);
+
+    private void SelectDuplicateCopies(bool keepNewest)
+    {
+        if (DuplicatesList.ItemsSource is not IEnumerable<DuplicateRow> rows)
+        {
+            return;
+        }
+
+        DuplicatesList.SelectedItems.Clear();
+        foreach (var group in rows.GroupBy(static row => row.GroupNumber))
+        {
+            var items = group.ToArray();
+            if (items.Length < 2)
+            {
+                continue;
+            }
+            var keeper = keepNewest
+                ? items.OrderByDescending(static row => row.File.LastWriteUtc).ThenBy(static row => row.Path, StringComparer.OrdinalIgnoreCase).First()
+                : items.OrderBy(static row => row.File.LastWriteUtc).ThenBy(static row => row.Path, StringComparer.OrdinalIgnoreCase).First();
+            foreach (var item in items)
+            {
+                if (!ReferenceEquals(item, keeper))
+                {
+                    DuplicatesList.SelectedItems.Add(item);
+                }
+            }
+        }
+    }
+
+    private void DuplicateSelectInFolder_Click(object sender, RoutedEventArgs e)
+    {
+        if (DuplicatesList.ItemsSource is not IEnumerable<DuplicateRow> rows)
+        {
+            return;
+        }
+
+        var folder = NativeFileDialogs.PickFolder(App.WindowHandle);
+        if (string.IsNullOrWhiteSpace(folder))
+        {
+            return;
+        }
+
+        DuplicatesList.SelectedItems.Clear();
+        foreach (var group in rows.GroupBy(static row => row.GroupNumber))
+        {
+            var items = group.ToArray();
+            if (items.Length < 2)
+            {
+                continue;
+            }
+            var inside = items.Where(row => ScanPaths.IsSameOrInside(row.Path, folder)).ToArray();
+            // Never select every copy of a group, even when all copies live in the picked folder.
+            var startIndex = inside.Length == items.Length ? 1 : 0;
+            for (var index = startIndex; index < inside.Length; index++)
+            {
+                DuplicatesList.SelectedItems.Add(inside[index]);
+            }
+        }
+    }
+
+    private void DuplicateClearSelection_Click(object sender, RoutedEventArgs e) =>
+        DuplicatesList.SelectedItems.Clear();
+
+    private void ChangesList_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e) => ShowSelectedChangeInExplorer();
+
+    private void ChangesList_RightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        var container = FindVisualParent<ListViewItem>(e.OriginalSource as DependencyObject);
+        if (container is not null && ChangesList.ItemFromContainer(container) is ChangeRow row)
+        {
+            ChangesList.SelectedItem = row;
+        }
+    }
+
+    private void ShowChangeInExplorer_Click(object sender, RoutedEventArgs e) => ShowSelectedChangeInExplorer();
+
+    private void ShowSelectedChangeInExplorer()
+    {
+        if (ChangesList.SelectedItem is not ChangeRow row)
+        {
+            return;
+        }
+
+        var path = row.FullPath;
+        if (!File.Exists(WindowsPaths.ToExtended(path)) && !Directory.Exists(WindowsPaths.ToExtended(path)))
+        {
+            var parent = ScanPaths.GetParent(path);
+            if (!string.IsNullOrWhiteSpace(parent) && Directory.Exists(WindowsPaths.ToExtended(parent)))
+            {
+                path = parent;
+            }
+        }
+        _fileOperations.ShowInExplorer(path);
+    }
+
+    private void CopyChangePath_Click(object sender, RoutedEventArgs e)
+    {
+        if (ChangesList.SelectedItem is ChangeRow row)
+        {
+            CopyText(row.FullPath);
+        }
+    }
+
+    private void IssuesList_RightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        var container = FindVisualParent<ListViewItem>(e.OriginalSource as DependencyObject);
+        if (container is not null && IssuesList.ItemFromContainer(container) is IssueRow row)
+        {
+            IssuesList.SelectedItem = row;
+        }
+    }
+
+    private void Page_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == VirtualKey.Back && !IsTextInputElement(FocusManager.GetFocusedElement(XamlRoot)))
+        {
+            e.Handled = true;
+            Up_Click(this, new RoutedEventArgs());
+        }
+    }
+
+    private static bool IsTextInputElement(object? focused) =>
+        focused is TextBox or RichEditBox or PasswordBox or NumberBox or AutoSuggestBox;
+
+    private void RefreshAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        Refresh_Click(this, new RoutedEventArgs());
+    }
+
+    private void FindAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        if (ReferenceEquals(WorkspaceTabs.SelectedItem, OverviewTab))
+        {
+            FilterBox.Focus(FocusState.Programmatic);
+            FilterBox.SelectAll();
+        }
+        else
+        {
+            WorkspaceTabs.SelectedItem = SearchTab;
+            SearchNameBox.Focus(FocusState.Programmatic);
+            SearchNameBox.SelectAll();
+        }
+    }
+
+    private void EditPathAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        ShowPathEditor();
+    }
+
+    private void BackAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        if (ReferenceEquals(WorkspaceTabs.SelectedItem, IssuesTab))
+        {
+            IssuesBackButton_Click(this, new RoutedEventArgs());
+        }
+        else
+        {
+            NavigateHistory(_navigationIndex - 1);
+        }
+    }
+
+    private void ForwardAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        NavigateHistory(_navigationIndex + 1);
+    }
+
+    private void UpAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        Up_Click(this, new RoutedEventArgs());
+    }
+
+    private MenuFlyout CreateTreemapTileMenu()
+    {
+        var menu = new MenuFlyout();
+        var openItem = new MenuFlyoutItem { Text = LocalizationService.Get("OpenMenuLabel") };
+        openItem.Click += (_, _) =>
+        {
+            if (_treemapTargetNode is { } node && !RefuseTrimmedForShell(node.FullPath))
+            {
+                if (node.IsDirectory) ShowNode(node);
+                else _fileOperations.Open(node.FullPath);
+            }
+        };
+        var showItem = new MenuFlyoutItem { Text = LocalizationService.Get("ShowInExplorerLabel") };
+        showItem.Click += (_, _) =>
+        {
+            if (_treemapTargetNode is { } node) _fileOperations.ShowInExplorer(node.FullPath);
+        };
+        var copyPathItem = new MenuFlyoutItem { Text = LocalizationService.Get("CopyPathLabel") };
+        copyPathItem.Click += (_, _) =>
+        {
+            if (_treemapTargetNode is { } node) CopyText(node.FullPath);
+        };
+        var propertiesItem = new MenuFlyoutItem { Text = LocalizationService.Get("PropertiesLabel") };
+        propertiesItem.Click += (_, _) =>
+        {
+            if (_treemapTargetNode is { } node && !RefuseTrimmedForShell(node.FullPath) && !_fileOperations.ShowProperties(App.WindowHandle, node.FullPath))
+            {
+                ShowNotification(LocalizationService.Format("PropertiesFailed", node.FullPath), InfoBarSeverity.Error);
+            }
+        };
+        var copyToItem = new MenuFlyoutItem { Text = LocalizationService.Get("CopyToLabel") };
+        copyToItem.Click += async (_, _) =>
+        {
+            if (_treemapTargetNode is { } node && CanDeleteTarget(new NodeRow(node)))
+            {
+                await TransferAsync((string[])[node.FullPath], move: false, ApplyRemovedPathsAsync);
+            }
+        };
+        var moveToItem = new MenuFlyoutItem { Text = LocalizationService.Get("MoveToLabel") };
+        moveToItem.Click += async (_, _) =>
+        {
+            if (_treemapTargetNode is { } node && CanDeleteTarget(new NodeRow(node)))
+            {
+                await TransferAsync((string[])[node.FullPath], move: true, ApplyRemovedPathsAsync);
+            }
+        };
+        var recycleItem = new MenuFlyoutItem { Text = LocalizationService.Get("RecycleLabel") };
+        recycleItem.Click += async (_, _) =>
+        {
+            if (_treemapTargetNode is { } node)
+            {
+                await DeleteTargetsAsync((IFileActionRow[])[new NodeRow(node)], permanently: false);
+            }
+        };
+        var deleteItem = new MenuFlyoutItem { Text = LocalizationService.Get("DeletePermanentlyLabel") };
+        deleteItem.Click += async (_, _) =>
+        {
+            if (_treemapTargetNode is { } node)
+            {
+                await DeleteTargetsAsync((IFileActionRow[])[new NodeRow(node)], permanently: true);
+            }
+        };
+
+        menu.Opening += (_, _) =>
+        {
+            var node = _treemapTargetNode;
+            var canAct = node is not null && CanDeleteTarget(new NodeRow(node)) && !IsDeletedPath(node.FullPath);
+            openItem.IsEnabled = node is not null;
+            showItem.IsEnabled = node is not null;
+            copyPathItem.IsEnabled = node is not null;
+            propertiesItem.IsEnabled = node is not null;
+            copyToItem.IsEnabled = canAct;
+            moveToItem.IsEnabled = canAct;
+            recycleItem.IsEnabled = canAct;
+            deleteItem.IsEnabled = canAct;
+        };
+
+        menu.Items.Add(openItem);
+        menu.Items.Add(showItem);
+        menu.Items.Add(copyPathItem);
+        menu.Items.Add(propertiesItem);
+        menu.Items.Add(new MenuFlyoutSeparator());
+        menu.Items.Add(copyToItem);
+        menu.Items.Add(moveToItem);
+        menu.Items.Add(new MenuFlyoutSeparator());
+        menu.Items.Add(recycleItem);
+        menu.Items.Add(deleteItem);
+        return menu;
     }
 }

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.29 (2026-11-25)
+
+- Full 128-bit file IDs (`FileId` and `FileIdHigh`) are now used across scanning, hard-link attribution, filtered views, duplicate search, and CSV exports, preventing collisions on ReFS and large NTFS volumes, while precise allocation checks open reparse points without downloading online-only cloud files.
+- `$RECYCLE.BIN` and `System Volume Information` are now scanned by default like ordinary folders, with a persistent **Settings** toggle and an `--exclude-system` CLI switch to skip them.
+- Folder and file pickers now use native Win32 dialogs (`IFileDialog`), so they work when DiskLoom runs as administrator and never create empty zero-byte placeholder files before an export.
+- Added a persistent **Size on disk** mode across the overview, treemap, largest files, extensions, ages, charts, insights, and cached drive scans, along with remembered result-column widths in `settings.json`.
+- Added current-folder scoping and double-click search drill-down on **Types & age**, bulk selection helpers and alternating group shading on **Duplicates**, a right-click context menu on **Treemap** tiles, keyboard shortcuts (`F5`, `Alt+Left`, `Alt+Right`, `Alt+Up`, `Ctrl+F`, `Delete`, and `Shift+Delete`), and automatic drive-list refresh when USB drives are connected or removed.
+- Hardened permanent and elevated deletion: volume roots and folders containing mounted volumes are refused, read-only directories and FAT32 or exFAT files are handled cleanly, cloud-synced placeholder folders traverse their contents instead of failing as external links, and elevated deletion verifies a SHA-256-checked temporary manifest with batched confirmations.
+- In-place MSI updates now wait for `msiexec.exe` to finish before cleaning up or restarting, normalize trailing `.0` version numbers, and give `DiskLoom.Core.dll` its own MSI component identity while making the Explorer context menu optional during setup.
+- Focused documentation, UI prompts, and CLI examples on local drives and USB storage, removed the scheduled-scan helper script, and added upfront CLI validation for `--export`, `--parallel`, `--depth`, and `--min-duplicate-mb`.
+
 ## 0.1.28 (2026-10-31)
 
 - The license changed to the Nax Source-Available License 1.0. You may still install and use the app. Modifying, redistributing or selling it needs written permission.

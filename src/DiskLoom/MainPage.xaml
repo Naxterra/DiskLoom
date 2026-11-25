@@ -5,8 +5,20 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:local="using:DiskLoom"
     mc:Ignorable="d"
-    Loaded="Page_Loaded">
+    Loaded="Page_Loaded"
+    KeyDown="Page_KeyDown">
+
+    <Page.KeyboardAccelerators>
+        <KeyboardAccelerator Key="F5" Invoked="RefreshAccelerator_Invoked" />
+        <KeyboardAccelerator Key="F" Modifiers="Control" Invoked="FindAccelerator_Invoked" />
+        <KeyboardAccelerator Key="L" Modifiers="Control" Invoked="EditPathAccelerator_Invoked" />
+        <KeyboardAccelerator Key="D" Modifiers="Menu" Invoked="EditPathAccelerator_Invoked" />
+        <KeyboardAccelerator Key="Left" Modifiers="Menu" Invoked="BackAccelerator_Invoked" />
+        <KeyboardAccelerator Key="Right" Modifiers="Menu" Invoked="ForwardAccelerator_Invoked" />
+        <KeyboardAccelerator Key="Up" Modifiers="Menu" Invoked="UpAccelerator_Invoked" />
+    </Page.KeyboardAccelerators>
 
     <Grid Background="{ThemeResource DiskLoomPageBrush}">
         <Grid.RowDefinitions>
@@ -46,6 +58,9 @@
                         </Flyout>
                     </AppBarButton.Flyout>
                 </AppBarButton>
+                <AppBarToggleButton x:Name="AllocatedModeButton" x:Uid="AllocatedModeButton" Label="Size on disk" Click="AllocatedMode_Click">
+                    <AppBarToggleButton.Icon><FontIcon Glyph="&#xEDA2;" /></AppBarToggleButton.Icon>
+                </AppBarToggleButton>
                 <AppBarSeparator />
                 <AppBarButton x:Name="ExportButton" x:Uid="ExportButton" Label="Export" Click="Export_Click" IsEnabled="False">
                     <AppBarButton.Icon><FontIcon Glyph="&#xEDE1;" /></AppBarButton.Icon>
@@ -99,7 +114,7 @@
                         </StackPanel>
                     </Button>
                 </StackPanel>
-                <ComboBox x:Name="DrivePicker" x:Uid="DrivePicker" Grid.Column="1" Height="32" PlaceholderText="Choose a drive" SelectionChanged="DrivePicker_SelectionChanged">
+                <ComboBox x:Name="DrivePicker" x:Uid="DrivePicker" Grid.Column="1" Height="32" PlaceholderText="Choose a drive" DropDownOpened="DrivePicker_DropDownOpened" SelectionChanged="DrivePicker_SelectionChanged">
                     <ComboBox.ItemTemplate>
                         <DataTemplate>
                             <!-- One line: the closed 32 px picker reuses this template and clipped a second line. -->
@@ -115,7 +130,7 @@
                     </ComboBox.ItemTemplate>
                 </ComboBox>
                 <Grid Grid.Column="2" VerticalAlignment="Center">
-                    <TextBox x:Name="PathBox" x:Uid="PathBox" Height="32" VerticalAlignment="Center" VerticalContentAlignment="Center" PlaceholderText="C:\ or \\server\share" KeyDown="PathBox_KeyDown" />
+                    <TextBox x:Name="PathBox" x:Uid="PathBox" Height="32" VerticalAlignment="Center" VerticalContentAlignment="Center" PlaceholderText="C:\ or D:\Folder" KeyDown="PathBox_KeyDown" />
                     <BreadcrumbBar x:Name="PathBreadcrumb" VerticalAlignment="Center" VerticalContentAlignment="Center" Visibility="Collapsed" ItemClicked="PathBreadcrumb_ItemClicked" />
                 </Grid>
                 <Button x:Name="EditPathButton" Grid.Column="3" Width="34" Height="32" Style="{StaticResource NavigationButtonStyle}" Visibility="Collapsed" ToolTipService.ToolTip="Edit path" Click="EditPath_Click">
@@ -190,15 +205,15 @@
                 </TreeView>
             </Grid>
 
-            <Thumb x:Name="TreeSplitter" Grid.Column="1" Background="{ThemeResource DiskLoomSplitterTrackBrush}" DragDelta="TreeSplitter_DragDelta" DoubleTapped="TreeSplitter_DoubleTapped" PointerEntered="TreeSplitter_PointerEntered" PointerExited="TreeSplitter_PointerExited">
+            <Thumb x:Name="TreeSplitter" Grid.Column="1" Background="{ThemeResource DiskLoomSplitterTrackBrush}" DragDelta="TreeSplitter_DragDelta" DragCompleted="TreeSplitter_DragCompleted" DoubleTapped="TreeSplitter_DoubleTapped">
                 <Thumb.Template>
                     <ControlTemplate TargetType="Thumb">
-                        <Grid Background="{TemplateBinding Background}">
+                        <local:SplitterGrid Background="{TemplateBinding Background}">
                             <Border Width="2" HorizontalAlignment="Center" Background="{ThemeResource DiskLoomBlueBrush}" Opacity="0.72" />
                             <Border Width="10" Height="72" HorizontalAlignment="Center" VerticalAlignment="Center" CornerRadius="5" Background="{ThemeResource DiskLoomBlueBrush}">
                                 <TextBlock Text="⋮" FontSize="20" FontWeight="Bold" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" />
                             </Border>
-                        </Grid>
+                        </local:SplitterGrid>
                     </ControlTemplate>
                 </Thumb.Template>
             </Thumb>
@@ -273,14 +288,14 @@
                         <!-- Header and row template are generated in code from the chosen columns. -->
                         <Border x:Name="ResultHeaderHost" Grid.Row="2" />
 
-                        <ListView x:Name="ChildrenList" Grid.Row="3" SelectionMode="Extended" DoubleTapped="ChildrenList_DoubleTapped" SelectionChanged="ChildrenList_SelectionChanged">
+                        <ListView x:Name="ChildrenList" Grid.Row="3" SelectionMode="Extended" DoubleTapped="ChildrenList_DoubleTapped" SelectionChanged="ChildrenList_SelectionChanged" SizeChanged="ChildrenList_SizeChanged">
                             <ListView.ItemContainerStyle>
                                 <Style TargetType="ListViewItem">
                                     <Setter Property="Padding" Value="0" />
                                     <Setter Property="HorizontalContentAlignment" Value="Stretch" />
                                 </Style>
                             </ListView.ItemContainerStyle>
-                            <!-- Shared with the largest-files, insights and duplicates lists in the constructor. -->
+                            <!-- The constructor moves this shared flyout to the file list row containers. -->
                             <ListView.ContextFlyout>
                                 <MenuFlyout x:Name="FileActionsMenu" Opening="FileActionsMenu_Opening">
                                     <MenuFlyoutItem x:Name="FileOpenMenuItem" x:Uid="OpenMenu" Text="Open" Click="OpenSelected_Click" />
@@ -384,7 +399,7 @@
                                             <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                                             <TextBlock Text="{Binding Path}" FontSize="11" Style="{StaticResource MutedTextStyle}" TextTrimming="CharacterEllipsis" />
                                         </StackPanel>
-                                        <TextBlock Grid.Column="1" Text="{Binding SizeText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1" Text="{Binding PrimarySizeText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
                                         <TextBlock Grid.Column="2" Text="{Binding ModifiedText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
                                     </Grid>
                                 </DataTemplate>
@@ -451,7 +466,7 @@
                                             <TextBlock Text="{Binding Path}" FontSize="11" Style="{StaticResource MutedTextStyle}" TextTrimming="CharacterEllipsis" />
                                         </StackPanel>
                                         <TextBlock Grid.Column="2" Text="{Binding Kind}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
-                                        <TextBlock Grid.Column="3" Text="{Binding SizeText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="3" Text="{Binding PrimarySizeText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
                                         <TextBlock Grid.Column="4" Text="{Binding ModifiedText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
                                     </Grid>
                                 </DataTemplate>
@@ -461,18 +476,26 @@
                 </TabViewItem>
 
                 <TabViewItem x:Uid="TypesAgeTab" Header="Types &amp; age" IsClosable="False">
-                    <Grid Padding="8" ColumnSpacing="12">
+                    <Grid Padding="8" RowSpacing="8" ColumnSpacing="12">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="2*" />
                             <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
-                        <Grid>
+                        <ComboBox x:Name="TypesAgeScopeBox" Grid.ColumnSpan="2" HorizontalAlignment="Left" MinWidth="200" SelectionChanged="TypesAgeScopeBox_SelectionChanged">
+                            <ComboBoxItem x:Uid="ScopeWholeScan" Content="Whole scan" IsSelected="True" />
+                            <ComboBoxItem x:Uid="ScopeCurrentFolder" Content="Current folder" />
+                        </ComboBox>
+                        <Grid Grid.Row="1">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="*" />
                             </Grid.RowDefinitions>
                             <TextBlock x:Uid="FileExtensionsHeader" Text="File extensions" FontSize="18" FontWeight="SemiBold" Margin="4,4,4,8" />
-                            <ListView x:Name="ExtensionsList" Grid.Row="1">
+                            <ListView x:Name="ExtensionsList" Grid.Row="1" DoubleTapped="ExtensionsList_DoubleTapped">
                                 <ListView.ItemTemplate>
                                     <DataTemplate>
                                         <Grid Padding="8,5" ColumnSpacing="10">
@@ -494,13 +517,13 @@
                                 </ListView.ItemTemplate>
                             </ListView>
                         </Grid>
-                        <Grid Grid.Column="1">
+                        <Grid Grid.Row="1" Grid.Column="1">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="*" />
                             </Grid.RowDefinitions>
                             <TextBlock x:Uid="AgeHeader" Text="Age by last change" FontSize="18" FontWeight="SemiBold" Margin="4,4,4,8" />
-                            <ListView x:Name="AgeList" Grid.Row="1">
+                            <ListView x:Name="AgeList" Grid.Row="1" DoubleTapped="AgeList_DoubleTapped">
                                 <ListView.ItemTemplate>
                                     <DataTemplate>
                                         <Grid Padding="8,7">
@@ -534,17 +557,35 @@
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <NumberBox x:Name="DuplicateMinimumBox" x:Uid="DuplicateMinimumBox" Header="Minimum size (MB)" Value="1" Minimum="0" SpinButtonPlacementMode="Compact" />
                             <Button x:Uid="FindDuplicatesButton" Grid.Column="1" Content="Find duplicates" VerticalAlignment="Bottom" Margin="0,0,0,1" Click="FindDuplicates_Click" />
                             <TextBlock x:Name="DuplicateSummaryText" x:Uid="DuplicateSummaryText" Grid.Column="2" Text="Scan a folder first" VerticalAlignment="Bottom" Margin="8,0,0,9" Style="{StaticResource MutedTextStyle}" />
-                            <Button x:Uid="ShowDuplicateButton" Grid.Column="3" Content="Show selected in Explorer" VerticalAlignment="Bottom" Margin="0,0,0,1" Click="ShowDuplicateInExplorer_Click" />
+                            <DropDownButton x:Name="DuplicateSelectButton" x:Uid="DuplicateSelectButton" Grid.Column="3" Content="Select…" VerticalAlignment="Bottom" Margin="0,0,0,1" IsEnabled="False">
+                                <DropDownButton.Flyout>
+                                    <MenuFlyout>
+                                        <MenuFlyoutItem x:Uid="DuplicateSelectKeepNewest" Text="Keep newest in each group" Click="DuplicateSelectKeepNewest_Click" />
+                                        <MenuFlyoutItem x:Uid="DuplicateSelectKeepOldest" Text="Keep oldest in each group" Click="DuplicateSelectKeepOldest_Click" />
+                                        <MenuFlyoutItem x:Uid="DuplicateSelectInFolder" Text="Select copies in folder…" Click="DuplicateSelectInFolder_Click" />
+                                        <MenuFlyoutSeparator />
+                                        <MenuFlyoutItem x:Uid="DuplicateClearSelection" Text="Clear selection" Click="DuplicateClearSelection_Click" />
+                                    </MenuFlyout>
+                                </DropDownButton.Flyout>
+                            </DropDownButton>
+                            <Button x:Name="ShowDuplicateButton" x:Uid="ShowDuplicateButton" Grid.Column="4" Content="Show selected in Explorer" VerticalAlignment="Bottom" Margin="0,0,0,1" IsEnabled="False" Click="ShowDuplicateInExplorer_Click" />
                         </Grid>
                         <InfoBar x:Uid="DuplicateInfo" Grid.Row="1" Severity="Informational" IsOpen="True" IsClosable="False" Margin="0,10,0,8" Message="DiskLoom samples candidates first, then verifies every byte with SHA-256. It never auto-selects files for deletion." />
-                        <ListView x:Name="DuplicatesList" Grid.Row="2" SelectionMode="Extended" DoubleTapped="DuplicateList_DoubleTapped">
+                        <ListView x:Name="DuplicatesList" Grid.Row="2" SelectionMode="Extended" SelectionChanged="DuplicatesList_SelectionChanged" DoubleTapped="DuplicateList_DoubleTapped">
+                            <ListView.ItemContainerStyle>
+                                <Style TargetType="ListViewItem">
+                                    <Setter Property="Padding" Value="0" />
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                </Style>
+                            </ListView.ItemContainerStyle>
                             <ListView.ItemTemplate>
                                 <DataTemplate>
-                                    <Grid Padding="8,6" ColumnSpacing="12">
+                                    <Grid Padding="12,6" ColumnSpacing="12" Background="{Binding GroupBackground}">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="90" />
                                             <ColumnDefinition Width="*" />
@@ -568,7 +609,7 @@
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="*" />
                         </Grid.RowDefinitions>
-                        <TextBlock x:Uid="InsightsHint" Text="Review-first cleanup opportunities—DiskLoom never deletes these automatically." Style="{StaticResource MutedTextStyle}" Margin="4,4,4,8" />
+                        <TextBlock x:Uid="InsightsHint" Text="Review-first cleanup opportunities: DiskLoom never deletes these automatically." Style="{StaticResource MutedTextStyle}" Margin="4,4,4,8" />
                         <ListView x:Name="InsightsList" Grid.Row="1" SelectionMode="Extended" DoubleTapped="InsightList_DoubleTapped">
                             <ListView.ItemTemplate>
                                 <DataTemplate>
@@ -601,7 +642,13 @@
                             <RowDefinition Height="*" />
                         </Grid.RowDefinitions>
                         <TextBlock x:Name="ChangesHeaderText" x:Uid="ChangesHeaderText" Text="Save a snapshot, then compare it with a later scan." Style="{StaticResource MutedTextStyle}" Margin="4,4,4,8" />
-                        <ListView x:Name="ChangesList" Grid.Row="1">
+                        <ListView x:Name="ChangesList" Grid.Row="1" DoubleTapped="ChangesList_DoubleTapped" RightTapped="ChangesList_RightTapped">
+                            <ListView.ContextFlyout>
+                                <MenuFlyout>
+                                    <MenuFlyoutItem x:Uid="ShowChangeMenu" Text="Show in File Explorer" Click="ShowChangeInExplorer_Click" />
+                                    <MenuFlyoutItem x:Uid="CopyChangePathMenu" Text="Copy path" Click="CopyChangePath_Click" />
+                                </MenuFlyout>
+                            </ListView.ContextFlyout>
                             <ListView.ItemTemplate>
                                 <DataTemplate>
                                     <Grid Padding="8,6" ColumnSpacing="12">
@@ -641,12 +688,9 @@
                                     <FontIcon Glyph="&#xE72B;" FontSize="13" />
                                     <TextBlock x:Uid="IssuesBackText" Text="Back to previous view" />
                                 </StackPanel>
-                                <Button.KeyboardAccelerators>
-                                    <KeyboardAccelerator Key="Left" Modifiers="Menu" />
-                                </Button.KeyboardAccelerators>
                             </Button>
                         </Grid>
-                        <ListView x:Name="IssuesList" Grid.Row="1">
+                        <ListView x:Name="IssuesList" Grid.Row="1" RightTapped="IssuesList_RightTapped">
                             <ListView.ContextFlyout>
                                 <MenuFlyout>
                                     <MenuFlyoutItem x:Uid="ShowIssueMenu" Text="Show in File Explorer" Click="ShowIssueInExplorer_Click" />

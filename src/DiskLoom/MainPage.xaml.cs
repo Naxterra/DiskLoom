@@ -1,9 +1,9 @@
 using System.Diagnostics;
 using System.Reflection;
-using System.Runtime.InteropServices;
 using DiskLoom.Core.Models;
 using DiskLoom.Core.Services;
 using DiskLoom.Services;
+using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
@@ -11,18 +11,15 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
-using Windows.Storage.Pickers;
 using Windows.System;
 using Windows.UI;
+using Windows.UI.Core;
 
 namespace DiskLoom;
 
 public sealed partial class MainPage : Page
 {
-    private const bool DisplayAllocatedMeasurements = false;
     private const double DefaultTreePaneWidth = 420;
-    private const int ArrowCursorId = 32512;
-    private const int ResizeHorizontalCursorId = 32644;
     private readonly FileSystemScanner _scanner = new();
     private readonly DuplicateFinder _duplicateFinder = new();
     private readonly SnapshotService _snapshotService = new();
@@ -38,6 +35,7 @@ public sealed partial class MainPage : Page
     private readonly Dictionary<string, TreeViewNode> _treeNodesByPath = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<TreeViewNode> _treeNodesBeingPopulated = [];
     private readonly List<ScanNode> _navigationHistory = [];
+    private MenuFlyout? _treemapMenu;
     private IReadOnlyList<DriveSummary> _drives = [];
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _filterDebounceTimer;
     private CancellationTokenSource? _workCancellation;
@@ -53,6 +51,7 @@ public sealed partial class MainPage : Page
     private bool _syncingTreeSelection;
     private bool _updatingTree;
     private bool _notificationShowsIssues;
+    private bool _removalInProgress;
     private object? _lastNonIssuesTab;
     private int _navigationIndex = -1;
     private long _scanRequestId;
@@ -62,10 +61,15 @@ public sealed partial class MainPage : Page
     public MainPage()
     {
         InitializeComponent();
+        // Attach the shared menu to row containers so its target is the row under the pointer.
+        ChildrenList.ContextFlyout = null;
         foreach (var list in new[] { ChildrenList, LargestFilesList, InsightsList, DuplicatesList, SearchResultsList })
         {
-            list.ContextFlyout = FileActionsMenu;
+            list.ContainerContentChanging += FileList_ContainerContentChanging;
+            list.AddHandler(KeyDownEvent, new KeyEventHandler(FileList_KeyDown), handledEventsToo: true);
         }
+        DirectoryTree.AddHandler(KeyDownEvent, new KeyEventHandler(DirectoryTree_KeyDown), handledEventsToo: true);
+        DirectoryTree.ContextRequested += DirectoryTree_ContextRequested;
     }
 
     private async void Page_Loaded(object sender, RoutedEventArgs e)
@@ -76,6 +80,11 @@ public sealed partial class MainPage : Page
         }
 
         _loaded = true;
+        _displayAllocated = App.Settings.DisplayAllocatedSize;
+        AllocatedModeButton.IsChecked = _displayAllocated;
+        TreePaneColumn.Width = new GridLength(Math.Clamp(App.Settings.TreePaneWidth, TreePaneColumn.MinWidth, TreePaneColumn.MaxWidth));
+        ResultColumnWidths.LoadWidths(App.Settings.ColumnWidths);
+
         ToolTipService.SetToolTip(BackButton, LocalizationService.Get("Back"));
         ToolTipService.SetToolTip(ForwardButton, LocalizationService.Get("Forward"));
         ToolTipService.SetToolTip(UpButton, LocalizationService.Get("UpOneLevel"));
@@ -89,9 +98,7 @@ public sealed partial class MainPage : Page
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(EditPathButton, LocalizationService.Get("EditPath"));
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(TreeSplitter, LocalizationService.Get("TreeSplitterTip"));
         UpdateSortIndicators();
-        _drives = _driveService.GetDrives();
-        DrivePicker.ItemsSource = _drives.Select(static drive => new DriveRow(drive)).ToArray();
-        RebuildDirectoryTree(result: null);
+        RefreshDrives();
         PathBox.Text = App.StartupScanPath ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
         if (!string.IsNullOrWhiteSpace(App.StartupScanPath))
@@ -104,18 +111,52 @@ public sealed partial class MainPage : Page
         _ = CheckForUpdatesAsync(interactive: false);
     }
 
+    internal void RefreshDrives()
+    {
+        if (!_loaded)
+        {
+            return;
+        }
+
+        _drives = _driveService.GetDrives();
+        var readyRoots = _drives.Where(static drive => drive.IsReady).Select(static drive => drive.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var staleCached = _scanCache.Keys
+            .Where(key => Path.GetPathRoot(key) is { } root && !readyRoots.Contains(root))
+            .ToArray();
+        foreach (var key in staleCached)
+        {
+            _scanCache.Remove(key);
+            _scanCacheOrder.RemoveAll(entry => entry.Equals(key, StringComparison.OrdinalIgnoreCase));
+        }
+
+        _syncingDrivePicker = true;
+        try
+        {
+            DrivePicker.ItemsSource = _drives.Select(static drive => new DriveRow(drive)).ToArray();
+            if (_currentNode is not null || _scanResult is not null)
+            {
+                SelectDriveForPath(_currentNode?.FullPath ?? _scanResult!.Root.FullPath);
+            }
+        }
+        finally
+        {
+            _syncingDrivePicker = false;
+        }
+
+        if (_scanResult is null && _workCancellation is null)
+        {
+            RebuildDirectoryTree(result: null);
+        }
+    }
+
+    private void DrivePicker_DropDownOpened(object? sender, object e) => RefreshDrives();
+
     private async void ScanFolder_Click(object sender, RoutedEventArgs e)
     {
-        var picker = new FolderPicker
+        var folder = NativeFileDialogs.PickFolder(App.WindowHandle);
+        if (!string.IsNullOrWhiteSpace(folder))
         {
-            SuggestedStartLocation = PickerLocationId.ComputerFolder
-        };
-        picker.FileTypeFilter.Add("*");
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, App.WindowHandle);
-        var folder = await picker.PickSingleFolderAsync();
-        if (folder is not null)
-        {
-            await StartScanAsync(folder.Path);
+            await StartScanAsync(folder);
         }
     }
 
@@ -182,7 +223,7 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        if (!Directory.Exists(path))
+        if (!Directory.Exists(WindowsPaths.ToExtended(path)))
         {
             ShowNotification(LocalizationService.Format("ScanPathMissing", path), InfoBarSeverity.Error);
             return;
@@ -240,7 +281,8 @@ public sealed partial class MainPage : Page
             {
                 CalculateAllocatedSize = true,
                 Parallelism = Math.Clamp(Environment.ProcessorCount, 2, 32),
-                FollowReparsePoints = false
+                FollowReparsePoints = false,
+                ExcludePatterns = App.Settings.ExcludeSystemFolders ? ScanOptions.SystemProtectedFolderPatterns : []
             }, progress, cancellation.Token);
             var presentation = await Task.Run(() => CreatePresentation(result), cancellation.Token);
 
@@ -251,6 +293,7 @@ public sealed partial class MainPage : Page
 
             CacheScan(path, presentation);
             ActivateScanResult(presentation, loadedFromCache: false);
+            RefreshDrives();
         }
         catch (OperationCanceledException)
         {
@@ -282,13 +325,29 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private ScanPresentation CreatePresentation(ScanResult result) => new(
-        result,
-        result.Root.Files()
-            .OrderByDescending(static file => GetMeasure(file, DisplayAllocatedMeasurements))
-            .Take(1000)
-            .ToArray(),
-        _insightService.Analyze(result));
+    private ScanPresentation CreatePresentation(ScanResult result)
+    {
+        var allocated = _displayAllocated;
+        var largest = new PriorityQueue<ScanNode, long>(1001);
+        foreach (var file in result.Root.Files())
+        {
+            var measure = GetMeasure(file, allocated);
+            largest.Enqueue(file, measure);
+            if (largest.Count > 1000)
+            {
+                largest.Dequeue();
+            }
+        }
+        var topFiles = new ScanNode[largest.Count];
+        for (var index = topFiles.Length - 1; index >= 0; index--)
+        {
+            topFiles[index] = largest.Dequeue();
+        }
+        return new ScanPresentation(
+            result,
+            topFiles,
+            _insightService.Analyze(result, allocated));
+    }
 
     private void ActivateScanResult(ScanPresentation presentation, bool loadedFromCache)
     {
@@ -343,11 +402,11 @@ public sealed partial class MainPage : Page
         RebuildDirectoryTree(result);
         TreeCountText.Text = $"{result.Root.FolderCount + 1:N0}";
 
+        var displayAllocated = _displayAllocated;
         LargestFilesList.ItemsSource = presentation.LargestFiles
-            .Select(static file => new NodeRow(file, DisplayAllocatedMeasurements))
+            .Select(file => new NodeRow(file, displayAllocated))
             .ToArray();
-        ExtensionsList.ItemsSource = result.Extensions.Take(500).Select(static item => new ExtensionRow(item)).ToArray();
-        AgeList.ItemsSource = result.Ages.Select(static item => new AgeRow(item)).ToArray();
+        PopulateTypesAndAge();
         InsightsList.ItemsSource = presentation.Insights.Select(static item => new InsightRow(item)).ToArray();
         IssuesList.ItemsSource = result.Issues.Select(static item => new IssueRow(item)).ToArray();
         var accessDeniedCount = result.Issues.Count(IsAccessDeniedIssue);
@@ -413,7 +472,8 @@ public sealed partial class MainPage : Page
         foreach (var path in GetPathChain(result.Root.FullPath))
         {
             _nodesByPath.TryGetValue(path, out var scannedNode);
-            var parentSize = (parentTreeNode?.Content as FolderTreeRow)?.Source?.Size ?? 0;
+            var parentSource = (parentTreeNode?.Content as FolderTreeRow)?.Source;
+            var parentSize = parentSource is null ? 0 : GetMeasure(parentSource, _displayAllocated);
             var treeNode = CreateTreeNode(path, scannedNode, parentTreeNode is null ? drive : null, parentSize);
             if (parentTreeNode is null)
             {
@@ -437,7 +497,9 @@ public sealed partial class MainPage : Page
     {
         var treeNode = new TreeViewNode
         {
-            Content = drive is null ? new FolderTreeRow(fullPath, node, parentSize) : new FolderTreeRow(drive, node),
+            Content = drive is null
+                ? new FolderTreeRow(fullPath, node, parentSize, _displayAllocated)
+                : new FolderTreeRow(drive, node, _displayAllocated),
             HasUnrealizedChildren = node?.Children.Any(static child => child.IsDirectory) == true
         };
         _treeNodesByPath[fullPath] = treeNode;
@@ -466,9 +528,10 @@ public sealed partial class MainPage : Page
             treeNode.HasUnrealizedChildren = false;
             if (treeNode.Children.Count == 0)
             {
+                var parentSize = GetMeasure(source, _displayAllocated);
                 foreach (var child in source.Children.Where(static child => child.IsDirectory))
                 {
-                    treeNode.Children.Add(CreateTreeNode(child.FullPath, child, parentSize: source.Size));
+                    treeNode.Children.Add(CreateTreeNode(child.FullPath, child, parentSize: parentSize));
                 }
             }
         }
@@ -542,6 +605,7 @@ public sealed partial class MainPage : Page
         var node = container is null ? null : DirectoryTree.NodeFromContainer(container);
         if (node?.Content is not FolderTreeRow row)
         {
+            e.Handled = true;
             return;
         }
 
@@ -554,6 +618,16 @@ public sealed partial class MainPage : Page
         finally
         {
             _syncingTreeSelection = false;
+        }
+    }
+
+    private void DirectoryTree_ContextRequested(UIElement sender, ContextRequestedEventArgs args)
+    {
+        if (args.TryGetPosition(DirectoryTree, out _) &&
+            FindVisualParent<TreeViewItem>(args.OriginalSource as DependencyObject) is null)
+        {
+            _treeContextRow = null;
+            args.Handled = true;
         }
     }
 
@@ -590,9 +664,10 @@ public sealed partial class MainPage : Page
             return false;
         }
         var root = Path.GetPathRoot(row.FullPath);
-        return string.IsNullOrWhiteSpace(root) ||
+        return (string.IsNullOrWhiteSpace(root) ||
             !row.FullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                .Equals(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
+                .Equals(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), StringComparison.OrdinalIgnoreCase)) &&
+            !WindowsPaths.IsVolumeRoot(row.FullPath);
     }
 
     private void TreeShowInExplorer_Click(object sender, RoutedEventArgs e)
@@ -611,87 +686,28 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private async void TreeRecycle_Click(object sender, RoutedEventArgs e)
-    {
-        var row = GetTreeContextRow();
-        if (row is null || !CanDeleteTreeFolder(row) || RefuseTrimmedNames(new[] { row.FullPath }))
-        {
-            return;
-        }
+    private async void TreeRecycle_Click(object sender, RoutedEventArgs e) =>
+        await DeleteTreeTargetAsync(GetTreeContextRow(), permanently: false);
 
-        var dialog = CreateDialog(
-            LocalizationService.Get("RecycleFolderTitle"),
-            row.FullPath + FilteredDeletionNote(new[] { row.FullPath }),
-            LocalizationService.Get("Recycle"),
-            LocalizationService.Get("Cancel"),
-            ContentDialogButton.Close);
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
-        {
-            return;
-        }
+    private async void TreeDeletePermanently_Click(object sender, RoutedEventArgs e) =>
+        await DeleteTreeTargetAsync(GetTreeContextRow(), permanently: true);
 
-        try
-        {
-            await _fileOperations.RecycleAsync(row.FullPath, App.WindowHandle);
-            await ApplyRemovedPathsAsync(new[] { row.FullPath });
-            ShowNotification(LocalizationService.Get("FolderRecycled"), InfoBarSeverity.Success);
-        }
-        catch (Exception exception)
-        {
-            await ReportFailedRemovalAsync(row.FullPath, exception);
-        }
-    }
-
-    private async void TreeDeletePermanently_Click(object sender, RoutedEventArgs e)
-    {
-        var row = GetTreeContextRow();
-        if (row is null || !CanDeleteTreeFolder(row))
-        {
-            return;
-        }
-
-        var dialog = CreateDialog(
-            LocalizationService.Get("DeleteFolderTitle"),
-            LocalizationService.Format("DeleteWarning", row.FullPath) + FilteredDeletionNote(new[] { row.FullPath }),
-            LocalizationService.Get("DeletePermanently"),
-            LocalizationService.Get("Cancel"),
-            ContentDialogButton.Close);
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
-        {
-            return;
-        }
-
-        try
-        {
-            await _fileOperations.DeletePermanentlyAsync(row.FullPath);
-            await ApplyRemovedPathsAsync(new[] { row.FullPath });
-            ShowNotification(LocalizationService.Get("FolderDeleted"), InfoBarSeverity.Warning);
-        }
-        catch (Exception exception)
-        {
-            await ReportFailedRemovalAsync(row.FullPath, exception);
-        }
-    }
-
-    private async Task ReportFailedRemovalAsync(string path, Exception exception)
-    {
-        var partly = await ApplyPartialRemovalAsync(new[] { path });
-        ShowNotification(
-            partly ? exception.Message + " " + LocalizationService.Get("RemovalPartlyDone") : exception.Message,
-            InfoBarSeverity.Error);
-    }
+    private Task DeleteTreeTargetAsync(FolderTreeRow? row, bool permanently) =>
+        row?.Source is { } folder && CanDeleteTreeFolder(row)
+            ? DeleteTargetsAsync(new[] { new NodeRow(folder) }, permanently, fromTree: true)
+            : Task.CompletedTask;
 
     private async Task RefreshAfterTreeDeletionAsync()
     {
         var scanRoot = _scanResult?.Root.FullPath;
-        if (!string.IsNullOrWhiteSpace(scanRoot) && Directory.Exists(scanRoot))
+        if (!string.IsNullOrWhiteSpace(scanRoot) && Directory.Exists(WindowsPaths.ToExtended(scanRoot)))
         {
             await StartScanAsync(scanRoot);
             return;
         }
 
         var parent = string.IsNullOrWhiteSpace(scanRoot) ? null : GetParentPath(scanRoot);
-        if (parent is not null && Directory.Exists(parent))
+        if (parent is not null && Directory.Exists(WindowsPaths.ToExtended(parent)))
         {
             await StartScanAsync(parent);
         }
@@ -732,6 +748,10 @@ public sealed partial class MainPage : Page
         ApplyFilter();
         RenderTreemap();
         RefreshChartIfVisible();
+        if (TypesAgeScopeBox.SelectedIndex == 1)
+        {
+            PopulateTypesAndAge();
+        }
     }
 
     private void AddNavigationEntry(ScanNode node)
@@ -789,45 +809,9 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private static IReadOnlyList<string> GetPathChain(string path)
-    {
-        var fullPath = Path.GetFullPath(path);
-        var root = Path.GetPathRoot(fullPath);
-        if (string.IsNullOrWhiteSpace(root))
-        {
-            return [fullPath];
-        }
+    private static IReadOnlyList<string> GetPathChain(string path) => ScanPaths.GetChain(path);
 
-        var chain = new List<string> { root };
-        var relativePath = Path.GetRelativePath(root, fullPath);
-        if (relativePath == ".")
-        {
-            return chain;
-        }
-
-        var current = root;
-        foreach (var segment in relativePath.Split(
-                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
-                     StringSplitOptions.RemoveEmptyEntries))
-        {
-            current = Path.Combine(current, segment);
-            chain.Add(current);
-        }
-        return chain;
-    }
-
-    private static string? GetParentPath(string path)
-    {
-        var fullPath = Path.GetFullPath(path);
-        var root = Path.GetPathRoot(fullPath);
-        if (!string.IsNullOrWhiteSpace(root) &&
-            fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                .Equals(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
-        {
-            return null;
-        }
-        return Directory.GetParent(fullPath)?.FullName;
-    }
+    private static string? GetParentPath(string path) => ScanPaths.GetParent(path);
 
     private static bool PathsEqual(string? left, string? right)
     {
@@ -1002,13 +986,14 @@ public sealed partial class MainPage : Page
         var nodes = SortNodes(FilterByQuery(_currentNode.Children));
 
         // Hide items this session deleted; a per-row disk check froze the UI for seconds in large folders.
-        const bool displayAllocated = DisplayAllocatedMeasurements;
-        var parentSize = _currentNode.Size;
+        var displayAllocated = _displayAllocated;
+        var parentSize = GetMeasure(_currentNode, displayAllocated);
         ChildrenList.ItemsSource = nodes
             .Where(node => !_deletedPaths.Contains(node.FullPath))
             .Take(100_000)
             .Select(node => new NodeRow(node, displayAllocated, ResultColumnWidths, parentSize))
             .ToArray();
+        ScheduleHeaderScrollbarSync();
     }
 
     private IEnumerable<ScanNode> FilterByQuery(IEnumerable<ScanNode> nodes)
@@ -1222,23 +1207,11 @@ public sealed partial class MainPage : Page
     private void TreeSplitter_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
     {
         TreePaneColumn.Width = new GridLength(DefaultTreePaneWidth);
+        SaveLayoutSettings();
         e.Handled = true;
     }
 
-    private void TreeSplitter_PointerEntered(object sender, PointerRoutedEventArgs e) =>
-        SetSystemCursor(ResizeHorizontalCursorId);
-
-    private void TreeSplitter_PointerExited(object sender, PointerRoutedEventArgs e) =>
-        SetSystemCursor(ArrowCursorId);
-
-    private static void SetSystemCursor(int cursorId)
-    {
-        var cursor = LoadCursor(nint.Zero, (nint)cursorId);
-        if (cursor != nint.Zero)
-        {
-            SetCursor(cursor);
-        }
-    }
+    private void TreeSplitter_DragCompleted(object sender, DragCompletedEventArgs e) => SaveLayoutSettings();
 
     private void ResultColumnSplitter_DragDelta(object sender, DragDeltaEventArgs e)
     {
@@ -1293,6 +1266,7 @@ public sealed partial class MainPage : Page
             _ => 30
         };
         ResultColumnWidths.Set(key, new GridLength(Math.Clamp(measured + padding, column.MinWidth, GetResultColumnMaximum(column))));
+        SaveLayoutSettings();
     }
 
     private double GetResultColumnActualWidth(ResultColumnKey key) =>
@@ -1317,7 +1291,7 @@ public sealed partial class MainPage : Page
             TreemapCanvas.Children.Count == 0 &&
             TreemapCanvas.ActualWidth >= 20 &&
             TreemapCanvas.ActualHeight >= 20 &&
-            _currentNode?.Children.Any(node => GetMeasure(node, DisplayAllocatedMeasurements) > 0) == true)
+            _currentNode?.Children.Any(node => !IsDeletedPath(node.FullPath) && GetMeasure(node, _displayAllocated) > 0) == true)
         {
             RenderTreemap();
         }
@@ -1350,13 +1324,17 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        const bool displayAllocated = DisplayAllocatedMeasurements;
+        var displayAllocated = _displayAllocated;
         var nodes = source
-            .Where(node => GetMeasure(node, displayAllocated) > 0)
+            .Where(node => !IsDeletedPath(node.FullPath) && GetMeasure(node, displayAllocated) > 0)
             .OrderByDescending(node => GetMeasure(node, displayAllocated))
             .Take(250)
             .ToArray();
         var tiles = Squarify(nodes, TreemapCanvas.ActualWidth, TreemapCanvas.ActualHeight, displayAllocated);
+        if (_currentNode is not null)
+        {
+            _treemapMenu ??= CreateTreemapTileMenu();
+        }
         foreach (var tile in tiles)
         {
             var border = new Border
@@ -1395,6 +1373,11 @@ public sealed partial class MainPage : Page
 
             ToolTipService.SetToolTip(border, $"{tile.Node.FullPath}\n{ByteFormatter.Format(GetMeasure(tile.Node, displayAllocated))}");
             border.DoubleTapped += TreemapTile_DoubleTapped;
+            if (_currentNode is not null)
+            {
+                border.ContextFlyout = _treemapMenu;
+                border.RightTapped += (_, _) => _treemapTargetNode = tile.Node;
+            }
             Canvas.SetLeft(border, tile.X);
             Canvas.SetTop(border, tile.Y);
             TreemapCanvas.Children.Add(border);
@@ -1418,15 +1401,12 @@ public sealed partial class MainPage : Page
 
     private async void FindDuplicates_Click(object sender, RoutedEventArgs e)
     {
-        if (_scanResult is null)
+        if (_scanResult is not { } scan)
         {
             ShowNotification(LocalizationService.Get("ScanBeforeDuplicates"), InfoBarSeverity.Warning);
             return;
         }
 
-        // Only cancel the previous operation's token here; disposing it now could race
-        // with that operation still observing the token before it unwinds. Each flow
-        // disposes its own CancellationTokenSource in its own finally block instead.
         _workCancellation?.Cancel();
         var cancellation = new CancellationTokenSource();
         _workCancellation = cancellation;
@@ -1434,6 +1414,10 @@ public sealed partial class MainPage : Page
         var minimumBytes = (long)Math.Max(0, double.IsNaN(DuplicateMinimumBox.Value) ? 1 : DuplicateMinimumBox.Value) * 1024 * 1024;
         var progress = new Progress<DuplicateProgress>(value =>
         {
+            if (cancellation.IsCancellationRequested || !ReferenceEquals(_workCancellation, cancellation) || !ReferenceEquals(_scanResult, scan))
+            {
+                return;
+            }
             var phase = LocalizationService.Get(value.Phase == "Sampling" ? "DuplicatePhaseSampling" : "DuplicatePhaseVerifying");
             StatusText.Text = LocalizationService.Format("DuplicateProgress", phase, value.CurrentPath);
             StatusDetailText.Text = $"{value.Processed:N0} / {value.Total:N0}";
@@ -1443,12 +1427,34 @@ public sealed partial class MainPage : Page
 
         try
         {
-            var result = await _duplicateFinder.FindAsync(_scanResult.Root, minimumBytes, progress, cancellation.Token);
-            var rows = result.Groups.SelectMany((group, index) => group.Files.Select(file => new DuplicateRow(index + 1, group, file))).ToArray();
+            // Snapshot candidate file references under the edit lock so deletions cannot mutate Children while FindAsync iterates.
+            var snapshotFiles = await ReadScanAsync(
+                () => scan.Root.Files().Where(file => file.Size >= minimumBytes && !IsDeletedPath(file.FullPath)).ToList(),
+                cancellation.Token);
+            var snapshotRoot = new ScanNode
+            {
+                Name = scan.Root.Name,
+                FullPath = scan.Root.FullPath,
+                IsDirectory = true,
+                Children = snapshotFiles
+            };
+            var result = await _duplicateFinder.FindAsync(snapshotRoot, minimumBytes, progress, cancellation.Token);
+            if (cancellation.IsCancellationRequested || !ReferenceEquals(_workCancellation, cancellation) || !ReferenceEquals(_scanResult, scan))
+            {
+                return;
+            }
+
+            var filteredGroups = result.Groups
+                .Select(group => group with { Files = group.Files.Where(file => !IsDeletedPath(file.Path)).ToArray() })
+                .Where(static group => group.Files.Count > 1)
+                .ToArray();
+            var rows = filteredGroups
+                .SelectMany((group, index) => group.Files.Select(file => new DuplicateRow(index + 1, group, file)))
+                .ToArray();
             _duplicateSkippedCloudFiles = result.SkippedCloudFiles;
             ShowDuplicateRows(rows);
             StatusText.Text = LocalizationService.Get("DuplicateComplete");
-            StatusDetailText.Text = LocalizationService.Format("VerifiedGroups", result.Groups.Count);
+            StatusDetailText.Text = LocalizationService.Format("VerifiedGroups", filteredGroups.Length);
             if (result.Issues.Count > 0)
             {
                 ShowNotification(LocalizationService.Format("DuplicateHashIssues", result.Issues.Count), InfoBarSeverity.Warning);
@@ -1456,20 +1462,26 @@ public sealed partial class MainPage : Page
         }
         catch (OperationCanceledException)
         {
-            StatusText.Text = LocalizationService.Get("DuplicateCanceled");
+            if (ReferenceEquals(_workCancellation, cancellation))
+            {
+                StatusText.Text = LocalizationService.Get("DuplicateCanceled");
+            }
         }
         catch (Exception exception)
         {
-            ShowNotification(exception.Message, InfoBarSeverity.Error);
+            if (ReferenceEquals(_workCancellation, cancellation))
+            {
+                ShowNotification(exception.Message, InfoBarSeverity.Error);
+            }
         }
         finally
         {
             if (ReferenceEquals(_workCancellation, cancellation))
             {
                 SetBusy(false);
-                cancellation.Dispose();
                 _workCancellation = null;
             }
+            cancellation.Dispose();
         }
     }
 
@@ -1483,9 +1495,29 @@ public sealed partial class MainPage : Page
 
     private void DuplicateList_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e) => ShowDuplicateInExplorer_Click(sender, e);
 
-    private void InsightList_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    private async void InsightList_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
     {
-        if (InsightsList.SelectedItem is InsightRow row)
+        if (InsightsList.SelectedItem is not InsightRow row)
+        {
+            return;
+        }
+
+        if (row.Insight.Kind == "TemporaryFiles" && _scanResult is not null)
+        {
+            ResetSearchInputs();
+            SearchNameBox.Text = "*.tmp; *.temp; *.dmp";
+            WorkspaceTabs.SelectedItem = SearchTab;
+            await RunSearchAsync();
+        }
+        else if (row.Insight.Kind == "EmptyFiles" && _scanResult is not null)
+        {
+            ResetSearchInputs();
+            SearchMinSizeBox.Value = 0;
+            SearchMaxSizeBox.Value = 0;
+            WorkspaceTabs.SelectedItem = SearchTab;
+            await RunSearchAsync();
+        }
+        else
         {
             _fileOperations.ShowInExplorer(row.Path);
         }
@@ -1499,15 +1531,12 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        var picker = new FileSavePicker
-        {
-            SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
-            SuggestedFileName = $"DiskLoom-{SanitizeFileName(result.Root.Name)}-{DateTime.Now:yyyyMMdd-HHmm}"
-        };
-        picker.FileTypeChoices.Add(LocalizationService.Get("FileSnapshot"), [".diskloom"]);
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, App.WindowHandle);
-        var file = await picker.PickSaveFileAsync();
-        if (file is null)
+        var path = NativeFileDialogs.PickSaveFile(
+            App.WindowHandle,
+            $"DiskLoom-{SanitizeFileName(result.Root.Name)}-{DateTime.Now:yyyyMMdd-HHmm}",
+            LocalizationService.Get("FileSnapshot"),
+            ".diskloom");
+        if (string.IsNullOrWhiteSpace(path))
         {
             return;
         }
@@ -1515,13 +1544,12 @@ public sealed partial class MainPage : Page
         try
         {
             SetBusy(true, LocalizationService.Get("SavingSnapshot"));
-            var path = file.Path;
             await ReadScanAsync(async () =>
             {
                 await _snapshotService.SaveAsync(result, path);
                 return true;
             });
-            StatusText.Text = LocalizationService.Format("SnapshotSaved", file.Path);
+            StatusText.Text = LocalizationService.Format("SnapshotSaved", path);
         }
         catch (Exception exception)
         {
@@ -1540,15 +1568,11 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        var picker = new FileOpenPicker
-        {
-            SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
-            ViewMode = PickerViewMode.List
-        };
-        picker.FileTypeFilter.Add(".diskloom");
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, App.WindowHandle);
-        var file = await picker.PickSingleFileAsync();
-        if (file is null)
+        var path = NativeFileDialogs.PickOpenFile(
+            App.WindowHandle,
+            LocalizationService.Get("FileSnapshot"),
+            "*.diskloom");
+        if (string.IsNullOrWhiteSpace(path))
         {
             return;
         }
@@ -1556,13 +1580,13 @@ public sealed partial class MainPage : Page
         try
         {
             SetBusy(true, LocalizationService.Get("ComparingSnapshots"));
-            var path = file.Path;
             var (older, changes) = await ReadScanAsync(async () =>
             {
                 var loaded = await _snapshotService.LoadAsync(path);
                 return (loaded, _snapshotService.Compare(loaded, _snapshotService.Create(result)));
             });
-            ChangesList.ItemsSource = changes.Select(static change => new ChangeRow(change)).ToArray();
+            _comparedSnapshot = older;
+            ChangesList.ItemsSource = changes.Select(change => new ChangeRow(change, result.Root.FullPath)).ToArray();
             ChangesHeaderText.Text = LocalizationService.Format("ChangesSince", changes.Count, older.CreatedUtc.LocalDateTime, older.RootPath);
             WorkspaceTabs.SelectedItem = ChangesTab;
             StatusText.Text = LocalizationService.Get("ComparisonComplete");
@@ -1576,6 +1600,11 @@ public sealed partial class MainPage : Page
         {
             EndSideTask();
         }
+    }
+
+    private void FileList_ContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs e)
+    {
+        e.ItemContainer.ContextFlyout = e.InRecycleQueue ? null : FileActionsMenu;
     }
 
     private void FileActionsMenu_Opening(object sender, object e)
@@ -1605,22 +1634,24 @@ public sealed partial class MainPage : Page
         FileMoveToMenuItem.IsEnabled = canDelete;
     }
 
+    private IReadOnlyList<IFileActionRow> GetMenuTargets() => GetSelectedFileRows(_fileMenuList);
+
     // Selected rows in display order (SelectedItems is in click order).
-    private IReadOnlyList<IFileActionRow> GetMenuTargets()
+    private static IReadOnlyList<IFileActionRow> GetSelectedFileRows(ListView? list)
     {
-        if (_fileMenuList?.ItemsSource is not IEnumerable<IFileActionRow> rows)
+        if (list?.ItemsSource is not IEnumerable<IFileActionRow> rows)
         {
             return Array.Empty<IFileActionRow>();
         }
 
-        var selected = _fileMenuList.SelectedItems.ToHashSet();
+        var selected = list.SelectedItems.ToHashSet();
         return rows.Where(selected.Contains).ToArray();
     }
 
     private static bool CanDeleteTarget(IFileActionRow row)
     {
         var root = Path.GetPathRoot(row.Path);
-        return row.CanDelete && !PathsEqual(row.Path, root);
+        return row.CanDelete && !PathsEqual(row.Path, root) && !WindowsPaths.IsVolumeRoot(row.Path);
     }
 
     private void OpenSelected_Click(object sender, RoutedEventArgs e)
@@ -1705,10 +1736,10 @@ public sealed partial class MainPage : Page
         }
 
         var path = row.Path;
-        if (!File.Exists(path) && !Directory.Exists(path))
+        if (!File.Exists(WindowsPaths.ToExtended(path)) && !Directory.Exists(WindowsPaths.ToExtended(path)))
         {
-            var parent = Path.GetDirectoryName(path);
-            if (!string.IsNullOrWhiteSpace(parent) && Directory.Exists(parent))
+            var parent = ScanPaths.GetParent(path);
+            if (!string.IsNullOrWhiteSpace(parent) && Directory.Exists(WindowsPaths.ToExtended(parent)))
             {
                 path = parent;
             }
@@ -1745,14 +1776,79 @@ public sealed partial class MainPage : Page
         WorkspaceTabs.SelectedItem = _lastNonIssuesTab is TabViewItem tab && !ReferenceEquals(tab, IssuesTab) ? tab : OverviewTab;
     }
 
-    private async void RecycleSelected_Click(object sender, RoutedEventArgs e) => await DeleteMenuTargetsAsync(permanently: false);
+    private async void RecycleSelected_Click(object sender, RoutedEventArgs e) =>
+        await DeleteTargetsAsync(GetMenuTargets(), permanently: false);
 
-    private async void DeleteSelected_Click(object sender, RoutedEventArgs e) => await DeleteMenuTargetsAsync(permanently: true);
+    private async void DeleteSelected_Click(object sender, RoutedEventArgs e) =>
+        await DeleteTargetsAsync(GetMenuTargets(), permanently: true);
 
-    private async Task DeleteMenuTargetsAsync(bool permanently)
+    private async void FileList_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        var rows = GetMenuTargets();
-        if (rows.Count == 0 || !rows.All(CanDeleteTarget))
+        if (TryGetDeleteShortcut(e, out var permanently))
+        {
+            await DeleteTargetsAsync(GetSelectedFileRows((ListView)sender), permanently);
+            return;
+        }
+
+        if (e.Key == VirtualKey.Enter && !e.KeyStatus.WasKeyDown)
+        {
+            var list = (ListView)sender;
+            if (ReferenceEquals(list, ChildrenList))
+            {
+                e.Handled = true;
+                ChildrenList_DoubleTapped(sender, new DoubleTappedRoutedEventArgs());
+            }
+            else if (ReferenceEquals(list, SearchResultsList))
+            {
+                e.Handled = true;
+                SearchResultsList_DoubleTapped(sender, new DoubleTappedRoutedEventArgs());
+            }
+            else if (ReferenceEquals(list, LargestFilesList))
+            {
+                e.Handled = true;
+                AnyFileList_DoubleTapped(sender, new DoubleTappedRoutedEventArgs());
+            }
+            else if (ReferenceEquals(list, DuplicatesList))
+            {
+                e.Handled = true;
+                ShowDuplicateInExplorer_Click(sender, new RoutedEventArgs());
+            }
+            else if (ReferenceEquals(list, InsightsList))
+            {
+                e.Handled = true;
+                InsightList_DoubleTapped(sender, new DoubleTappedRoutedEventArgs());
+            }
+        }
+    }
+
+    private async void DirectoryTree_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (TryGetDeleteShortcut(e, out var permanently))
+        {
+            await DeleteTreeTargetAsync(DirectoryTree.SelectedNode?.Content as FolderTreeRow, permanently);
+        }
+    }
+
+    private static bool TryGetDeleteShortcut(KeyRoutedEventArgs e, out bool permanently)
+    {
+        permanently = false;
+        if (e.Key != VirtualKey.Delete || IsKeyDown(VirtualKey.Control) || IsKeyDown(VirtualKey.Menu) ||
+            IsKeyDown(VirtualKey.LeftWindows) || IsKeyDown(VirtualKey.RightWindows))
+        {
+            return false;
+        }
+
+        e.Handled = true;
+        permanently = IsKeyDown(VirtualKey.Shift);
+        return !e.KeyStatus.WasKeyDown;
+
+        static bool IsKeyDown(VirtualKey key) =>
+            (InputKeyboardSource.GetKeyStateForCurrentThread(key) & CoreVirtualKeyStates.Down) != 0;
+    }
+
+    private async Task DeleteTargetsAsync(IReadOnlyList<IFileActionRow> rows, bool permanently, bool fromTree = false)
+    {
+        if (_removalInProgress || _workCancellation is not null || rows.Count == 0 || !rows.All(CanDeleteTarget))
         {
             return;
         }
@@ -1763,6 +1859,19 @@ public sealed partial class MainPage : Page
             return;
         }
 
+        _removalInProgress = true;
+        try
+        {
+            await ConfirmAndDeleteAsync(rows, permanently, fromTree);
+        }
+        finally
+        {
+            _removalInProgress = false;
+        }
+    }
+
+    private async Task ConfirmAndDeleteAsync(IReadOnlyList<IFileActionRow> rows, bool permanently, bool fromTree)
+    {
         // A duplicate check is a snapshot: refuse to delete a copy whose content may have changed since, and keep
         // at least one intact copy of each file, also after "Select all" or when another program removed the rest.
         var duplicates = rows.OfType<DuplicateRow>().ToArray();
@@ -1797,22 +1906,31 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        var subject = (rows.Count == 1 ? rows[0].Path : LocalizationService.Format("MultipleItemsSummary", rows.Count)) +
-                      FilteredDeletionNote(rows.Select(static row => row.Path).ToArray());
-        var dialog = permanently
-            ? CreateDialog(
-                LocalizationService.Get("DeleteTitle"),
-                LocalizationService.Format("DeleteWarning", subject),
-                LocalizationService.Get("DeletePermanently"),
-                LocalizationService.Get("Cancel"),
-                ContentDialogButton.Close)
-            : CreateDialog(
-                LocalizationService.Get("RecycleTitle"),
-                subject,
-                LocalizationService.Get("Recycle"),
-                LocalizationService.Get("Cancel"),
-                ContentDialogButton.Close);
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        var paths = rows.Select(static row => row.Path).ToArray();
+        var subject = string.Join(Environment.NewLine, paths) + FilteredDeletionNote(paths);
+        if (rows.Count > 1)
+        {
+            subject = LocalizationService.Format("MultipleItemsSummary", rows.Count) + Environment.NewLine + Environment.NewLine + subject;
+        }
+        var title = permanently
+            ? (fromTree ? "DeleteFolderTitle" : rows.Count == 1 ? "DeleteTitle" : "DeleteItemsTitle")
+            : (fromTree ? "RecycleFolderTitle" : "RecycleTitle");
+        var content = new ScrollViewer
+        {
+            MaxHeight = 240,
+            Content = new TextBlock
+            {
+                Text = permanently ? LocalizationService.Format("DeleteWarning", subject) : subject,
+                TextWrapping = TextWrapping.Wrap
+            }
+        };
+        var dialog = CreateDialog(
+            LocalizationService.Get(title),
+            content,
+            LocalizationService.Get(permanently ? "DeletePermanently" : "Recycle"),
+            LocalizationService.Get("Cancel"),
+            ContentDialogButton.Close);
+        if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary)
         {
             return;
         }
@@ -1823,9 +1941,42 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        var failures = 0;
+        if (permanently && !Environment.IsPrivilegedProcess && duplicates.Length == 0 &&
+            paths.All(AdministratorDeletion.CanRetryPath))
+        {
+            using var permissionCancellation = new CancellationTokenSource();
+            var previousCancellation = _workCancellation;
+            _workCancellation = permissionCancellation;
+            SetBusy(true, LocalizationService.Get("CheckingPermissions"));
+            bool needsElevation;
+            try
+            {
+                needsElevation = await Task.Run(
+                    () => paths.Any(path => _fileOperations.PermanentDeletionRequiresElevation(path, permissionCancellation.Token)),
+                    permissionCancellation.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            finally
+            {
+                if (ReferenceEquals(_workCancellation, permissionCancellation))
+                {
+                    _workCancellation = previousCancellation;
+                    EndSideTask();
+                }
+            }
+
+            if (needsElevation)
+            {
+                await DeleteWithAdministratorAsync(paths, fromTree);
+                return;
+            }
+        }
+
         var removed = new List<string>();
-        var failed = new List<string>();
+        var failed = new List<(string Path, Exception Error)>();
         foreach (var row in rows)
         {
             try
@@ -1840,19 +1991,19 @@ public sealed partial class MainPage : Page
                 }
                 removed.Add(row.Path);
             }
-            catch
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or OperationCanceledException)
             {
-                failures++;
-                failed.Add(row.Path);
+                failed.Add((row.Path, exception));
             }
         }
 
         await ApplyRemovedPathsAsync(removed);
-        var partly = await ApplyPartialRemovalAsync(failed);
-        if (failures > 0)
+        var partly = await ApplyPartialRemovalAsync(failed.Select(static item => item.Path).ToArray());
+        if (failed.Count > 0)
         {
             ShowNotification(
-                LocalizationService.Format(permanently ? "DeleteFailedSummary" : "RecycleFailedSummary", failures, rows.Count) +
+                LocalizationService.Format(permanently ? "DeleteFailedSummary" : "RecycleFailedSummary", failed.Count, rows.Count) +
+                " " + failed[0].Error.Message +
                 (partly ? " " + LocalizationService.Get("RemovalPartlyDone") : string.Empty),
                 permanently ? InfoBarSeverity.Error : InfoBarSeverity.Warning);
         }
@@ -1860,9 +2011,62 @@ public sealed partial class MainPage : Page
         {
             ShowNotification(
                 rows.Count == 1
-                    ? LocalizationService.Get(permanently ? "Deleted" : "Recycled")
+                    ? LocalizationService.Get(permanently ? (fromTree ? "FolderDeleted" : "Deleted") : (fromTree ? "FolderRecycled" : "Recycled"))
                     : LocalizationService.Format(permanently ? "DeletedMultiple" : "RecycledMultiple", rows.Count),
                 permanently ? InfoBarSeverity.Warning : InfoBarSeverity.Success);
+        }
+    }
+
+    private async Task DeleteWithAdministratorAsync(string[] paths, bool fromTree)
+    {
+        int exitCode;
+        try
+        {
+            exitCode = await AdministratorDeletion.RequestAsync(paths, App.CurrentLanguage);
+        }
+        catch (System.ComponentModel.Win32Exception exception) when (exception.NativeErrorCode == 1223)
+        {
+            ShowNotification(LocalizationService.Get("DeleteAsAdministratorCanceled"), InfoBarSeverity.Informational);
+            return;
+        }
+        catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            ShowNotification(exception.Message, InfoBarSeverity.Error);
+            return;
+        }
+
+        var removed = paths.Where(IsDeletionConfirmedOnDisk).ToArray();
+        var remaining = paths.Except(removed, StringComparer.OrdinalIgnoreCase).ToArray();
+        await ApplyRemovedPathsAsync(removed);
+        var partly = await ApplyPartialRemovalAsync(remaining);
+        if (remaining.Length == 0)
+        {
+            ShowNotification(paths.Length == 1
+                ? LocalizationService.Get(fromTree ? "FolderDeleted" : "Deleted")
+                : LocalizationService.Format("DeletedMultiple", paths.Length), InfoBarSeverity.Warning);
+            return;
+        }
+
+        var message = LocalizationService.Get(exitCode == AdministratorDeletion.Canceled
+            ? "AdministratorDeletionCanceled"
+            : "DeleteAsAdministratorIncomplete");
+        ShowNotification(message + (partly ? " " + LocalizationService.Get("RemovalPartlyDone") : string.Empty), InfoBarSeverity.Warning);
+    }
+
+    private static bool IsDeletionConfirmedOnDisk(string path)
+    {
+        try
+        {
+            _ = File.GetAttributes(WindowsPaths.ToExtended(path));
+            return false;
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return false;
         }
     }
 
@@ -1889,10 +2093,10 @@ public sealed partial class MainPage : Page
             {
                 if (interactive)
                 {
-                    await CreateDialog(
+                    await ShowDialogAsync(CreateDialog(
                         LocalizationService.Get("UpdatesTitle"),
                         LocalizationService.Format("UpdateNotConfigured", configurationPath),
-                        LocalizationService.Get("Ok")).ShowAsync();
+                        LocalizationService.Get("Ok")));
                 }
                 return;
             }
@@ -1901,9 +2105,14 @@ public sealed partial class MainPage : Page
             {
                 if (interactive)
                 {
-                    await CreateDialog(LocalizationService.Get("UpdatesTitle"), LocalizationService.Get("UpdateCurrent"), LocalizationService.Get("Ok")).ShowAsync();
+                    await ShowDialogAsync(CreateDialog(LocalizationService.Get("UpdatesTitle"), LocalizationService.Get("UpdateCurrent"), LocalizationService.Get("Ok")));
                 }
                 return;
+            }
+
+            if (!interactive)
+            {
+                await WaitForNoDialogAsync();
             }
 
             var availableVersion = result.Manifest.Version;
@@ -1916,17 +2125,18 @@ public sealed partial class MainPage : Page
                 LocalizationService.Get(canInstallDirectly ? "DownloadInstall" : "OpenGitHubRelease"),
                 LocalizationService.Get("Later"),
                 result.Manifest.Mandatory ? ContentDialogButton.Primary : ContentDialogButton.Close);
-            if (await prompt.ShowAsync() != ContentDialogResult.Primary)
+            if (await ShowDialogAsync(prompt) != ContentDialogResult.Primary)
             {
                 return;
             }
 
             if (!canInstallDirectly)
             {
-                var releaseUrl = string.IsNullOrWhiteSpace(result.Manifest.ReleaseNotesUrl)
-                    ? "https://github.com/Naxterra/DiskLoom/releases/latest"
-                    : result.Manifest.ReleaseNotesUrl;
-                Process.Start(new ProcessStartInfo(releaseUrl) { UseShellExecute = true });
+                var releaseUrl = Uri.TryCreate(result.Manifest.ReleaseNotesUrl, UriKind.Absolute, out var notes) &&
+                    notes.Scheme == Uri.UriSchemeHttps && notes.UserInfo.Length == 0
+                    ? notes.AbsoluteUri
+                    : "https://github.com/Naxterra/DiskLoom/releases/latest";
+                using Process? browser = Process.Start(new ProcessStartInfo(releaseUrl) { UseShellExecute = true });
                 return;
             }
 
@@ -1935,7 +2145,8 @@ public sealed partial class MainPage : Page
             var progress = new Progress<double>(value => WorkProgress.Value = value * 100);
             var installer = await _updateService.DownloadAndVerifyAsync(result.Manifest, configuration, progress);
             StatusText.Text = LocalizationService.Get("StartingInstaller");
-            _updateService.StartInstaller(installer, relaunchPath: Environment.ProcessPath);
+            using var installerProcess = _updateService.StartInstaller(installer, relaunchPath: Environment.ProcessPath,
+                verifiedSha256: result.Manifest.Sha256);
             App.Window.Close();
         }
         catch (Exception exception)
@@ -1957,10 +2168,10 @@ public sealed partial class MainPage : Page
     private async void About_Click(object sender, RoutedEventArgs e)
     {
         var version = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.1.0";
-        await CreateDialog(
+        await ShowDialogAsync(CreateDialog(
             $"DiskLoom {version}",
-            LocalizationService.Format("AboutContent", RuntimeInformation.FrameworkDescription, CreatorIdentity.AboutLine),
-            LocalizationService.Get("Close")).ShowAsync();
+            LocalizationService.Format("AboutContent", System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription, CreatorIdentity.AboutLine),
+            LocalizationService.Get("Close")));
     }
 
     private async void Settings_Click(object sender, RoutedEventArgs e)
@@ -1972,13 +2183,25 @@ public sealed partial class MainPage : Page
             ItemsSource = new[] { "English", "Deutsch" },
             SelectedIndex = App.CurrentLanguage == "de-DE" ? 1 : 0
         };
+        var excludeSystemBox = new CheckBox
+        {
+            Content = LocalizationService.Get("SettingsExcludeSystem"),
+            IsChecked = App.Settings.ExcludeSystemFolders
+        };
+        var allocatedBox = new CheckBox
+        {
+            Content = LocalizationService.Get("SettingsDisplayAllocated"),
+            IsChecked = _displayAllocated
+        };
         var content = new StackPanel
         {
             Spacing = 10,
-            MinWidth = 320,
+            MinWidth = 340,
             Children =
             {
                 languageBox,
+                excludeSystemBox,
+                allocatedBox,
                 new TextBlock
                 {
                     Text = LocalizationService.Get("SettingsRestartHint"),
@@ -1996,10 +2219,40 @@ public sealed partial class MainPage : Page
             CloseButtonText = LocalizationService.Get("Cancel"),
             DefaultButton = ContentDialogButton.Primary
         };
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary)
         {
             var language = languageBox.SelectedIndex == 1 ? "de-DE" : "en-US";
-            App.RestartWithLanguage(language, _scanResult?.Root.FullPath);
+            var excludeSystem = excludeSystemBox.IsChecked == true;
+            var displayAllocated = allocatedBox.IsChecked == true;
+            var excludeChanged = excludeSystem != App.Settings.ExcludeSystemFolders;
+
+            App.Settings = App.Settings with
+            {
+                ExcludeSystemFolders = excludeSystem,
+                DisplayAllocatedSize = displayAllocated
+            };
+            AppSettings.Save(App.Settings);
+
+            if (language != App.CurrentLanguage)
+            {
+                App.RestartWithLanguage(language, _scanResult?.Root.FullPath);
+                return;
+            }
+
+            if (displayAllocated != _displayAllocated)
+            {
+                ApplyDisplayAllocatedSetting(displayAllocated);
+            }
+
+            if (excludeChanged)
+            {
+                _scanCache.Clear();
+                _scanCacheOrder.Clear();
+                if (_scanResult is { } currentScan)
+                {
+                    await StartScanAsync(currentScan.Root.FullPath);
+                }
+            }
         }
     }
 
@@ -2012,8 +2265,11 @@ public sealed partial class MainPage : Page
         ExtensionsList.ItemsSource = null;
         AgeList.ItemsSource = null;
         DuplicatesList.ItemsSource = null;
+        DuplicateSelectButton.IsEnabled = false;
+        ShowDuplicateButton.IsEnabled = false;
         InsightsList.ItemsSource = null;
         ChangesList.ItemsSource = null;
+        _comparedSnapshot = null;
         IssuesList.ItemsSource = null;
         SearchResultsList.ItemsSource = null;
         SearchSummaryText.Text = LocalizationService.Get("SearchSummaryDefault");
@@ -2114,7 +2370,7 @@ public sealed partial class MainPage : Page
 
     private ContentDialog CreateDialog(
         string title,
-        string content,
+        object content,
         string primaryText,
         string? closeText = null,
         ContentDialogButton defaultButton = ContentDialogButton.Primary) => new()
@@ -2136,12 +2392,6 @@ public sealed partial class MainPage : Page
     }
 
     private static long GetMeasure(ScanNode node, bool allocated) => allocated ? node.AllocatedSize : node.Size;
-
-    [DllImport("user32.dll", EntryPoint = "LoadCursorW")]
-    private static extern nint LoadCursor(nint instance, nint cursorName);
-
-    [DllImport("user32.dll")]
-    private static extern nint SetCursor(nint cursor);
 
     private static string SanitizeFileName(string name)
     {

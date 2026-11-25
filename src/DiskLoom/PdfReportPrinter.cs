@@ -14,16 +14,22 @@ internal static class PdfReportPrinter
             "DiskLoom",
             "WebView2");
         Directory.CreateDirectory(userDataFolder);
-        var environment = await CoreWebView2Environment.CreateWithOptionsAsync(string.Empty, userDataFolder, new CoreWebView2EnvironmentOptions());
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        var environment = await CoreWebView2Environment.CreateWithOptionsAsync(string.Empty, userDataFolder, new CoreWebView2EnvironmentOptions())
+            .AsTask(timeout.Token).WaitAsync(timeout.Token);
         var controller = await environment.CreateCoreWebView2ControllerAsync(
-            CoreWebView2ControllerWindowReference.CreateFromWindowHandle((ulong)windowHandle));
+            CoreWebView2ControllerWindowReference.CreateFromWindowHandle((ulong)windowHandle)).AsTask(timeout.Token).WaitAsync(timeout.Token);
         try
         {
             controller.IsVisible = false;
             var webView = controller.CoreWebView2;
             var navigation = new TaskCompletionSource<CoreWebView2WebErrorStatus?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var failed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            webView.ProcessFailed += (_, _) => failed.TrySetResult();
             webView.NavigationCompleted += (_, args) => navigation.TrySetResult(args.IsSuccess ? null : args.WebErrorStatus);
             webView.Navigate(new Uri(htmlPath).AbsoluteUri);
+            if (await Task.WhenAny(navigation.Task, failed.Task).WaitAsync(timeout.Token) == failed.Task)
+                throw new IOException("The PDF renderer stopped unexpectedly.");
             if (await navigation.Task is { } error)
             {
                 throw new InvalidOperationException($"The report could not be rendered ({error}).");
@@ -39,7 +45,10 @@ internal static class PdfReportPrinter
             settings.MarginBottom = 0.5;
             settings.MarginLeft = 0.4;
             settings.MarginRight = 0.4;
-            if (!await webView.PrintToPdfAsync(pdfPath, settings))
+            var printing = webView.PrintToPdfAsync(pdfPath, settings).AsTask(timeout.Token);
+            if (await Task.WhenAny(printing, failed.Task).WaitAsync(timeout.Token) == failed.Task)
+                throw new IOException("The PDF renderer stopped unexpectedly.");
+            if (!await printing)
             {
                 throw new IOException($"The PDF could not be written to {pdfPath}.");
             }

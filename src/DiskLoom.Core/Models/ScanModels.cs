@@ -18,6 +18,12 @@ public sealed class ScanNode
     public FileAttributes Attributes { get; init; }
     public uint VolumeSerialNumber { get; internal set; }
     public ulong FileId { get; internal set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public ulong FileIdHigh { get; internal set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public uint ReparsePointTag { get; init; }
+    [JsonIgnore]
+    public FileIdentity Identity => new(VolumeSerialNumber, FileId, FileIdHigh);
     // Number of hard links to the file; 0 = not queried (directory enumeration does not report it).
     public uint HardLinkCount { get; internal set; }
     // True for every path except the one that DiskLoom counts the shared data on.
@@ -56,8 +62,19 @@ public sealed class ScanNode
     public IEnumerable<ScanNode> Files() => DescendantsAndSelf().Where(static node => !node.IsDirectory);
 }
 
+public readonly record struct FileIdentity(uint VolumeSerialNumber, ulong FileIdLow, ulong FileIdHigh)
+{
+    public bool HasIdentity => FileIdLow != 0 || FileIdHigh != 0;
+}
+
 public sealed record ScanOptions
 {
+    public static IReadOnlyList<string> SystemProtectedFolderPatterns { get; } =
+    [
+        "$RECYCLE.BIN",
+        "System Volume Information"
+    ];
+
     public int Parallelism { get; init; } = Math.Clamp(Environment.ProcessorCount, 2, 32);
     public bool CalculateAllocatedSize { get; init; } = true;
     public bool PreciseAllocationSize { get; init; }
@@ -65,11 +82,7 @@ public sealed record ScanOptions
     public bool FollowReparsePoints { get; init; }
     public bool IncludeHidden { get; init; } = true;
     public bool IncludeSystem { get; init; } = true;
-    public IReadOnlyList<string> ExcludePatterns { get; init; } =
-    [
-        "$RECYCLE.BIN",
-        "System Volume Information"
-    ];
+    public IReadOnlyList<string> ExcludePatterns { get; init; } = [];
 }
 
 public sealed record ScanProgress(

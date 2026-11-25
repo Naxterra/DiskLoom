@@ -158,7 +158,7 @@ internal sealed class NamePatternMatcher
     {
         foreach (var pattern in _patterns)
         {
-            if (FileSystemName.MatchesSimpleExpression(pattern, name, ignoreCase: true))
+            if (pattern == "*." ? string.IsNullOrEmpty(Path.GetExtension(name)) : FileSystemName.MatchesSimpleExpression(pattern, name, ignoreCase: true))
             {
                 return true;
             }
@@ -304,7 +304,7 @@ public static class ScanTreeFilter
         // only a link the full scan counted as zero still shows the space the data uses.
         var sharedOwners = source.Root.Files()
             .Where(file => file.SharesStorage && Matches(file))
-            .GroupBy(static file => (file.VolumeSerialNumber, file.FileId))
+            .GroupBy(static file => file.Identity)
             .Select(static group => group.MinBy(static file => file.FullPath, StringComparer.OrdinalIgnoreCase)!)
             .ToHashSet(ReferenceEqualityComparer.Instance);
 
@@ -369,7 +369,9 @@ public static class ScanTreeFilter
         LastAccessUtc = node.LastAccessUtc,
         Attributes = node.Attributes,
         VolumeSerialNumber = node.VolumeSerialNumber,
-        FileId = node.FileId
+        FileId = node.FileId,
+        FileIdHigh = node.FileIdHigh,
+        ReparsePointTag = node.ReparsePointTag
     };
 
     private static ScanNode CloneFile(ScanNode node) => new()
@@ -386,6 +388,8 @@ public static class ScanTreeFilter
         Attributes = node.Attributes,
         VolumeSerialNumber = node.VolumeSerialNumber,
         FileId = node.FileId,
+        FileIdHigh = node.FileIdHigh,
+        ReparsePointTag = node.ReparsePointTag,
         HardLinkCount = node.HardLinkCount,
         IsAdditionalHardLink = node.IsAdditionalHardLink,
         SharesStorage = node.SharesStorage,
@@ -424,24 +428,26 @@ public static class FolderBreakdown
         BreakdownKind kind,
         int maximumSlices,
         DateTimeOffset now,
-        CancellationToken cancellationToken = default) => kind switch
+        CancellationToken cancellationToken = default,
+        bool useAllocated = false) => kind switch
     {
         BreakdownKind.Children => Collapse(
-            folder.Children.Where(static child => child.Size > 0)
-                .Select(static child => new BreakdownSlice(child.Name, child.Size, child.FileCount, child)),
+            folder.Children
+                .Select(child => (Node: child, Measure: useAllocated ? child.AllocatedSize : child.Size))
+                .Where(static item => item.Measure > 0)
+                .Select(static item => new BreakdownSlice(item.Node.Name, item.Measure, item.Node.FileCount, item.Node)),
             maximumSlices),
         BreakdownKind.Extensions => Collapse(
             ScanStatistics.Build(folder, now, cancellationToken).Extensions
-                .Where(static extension => extension.Size > 0)
-                .Select(static extension => new BreakdownSlice(extension.Extension, extension.Size, extension.FileCount)),
+                .Select(extension => (Extension: extension, Measure: useAllocated ? extension.AllocatedSize : extension.Size))
+                .Where(static item => item.Measure > 0)
+                .Select(static item => new BreakdownSlice(item.Extension.Extension, item.Measure, item.Extension.FileCount)),
             maximumSlices),
-        BreakdownKind.Categories => ByCategory(folder, cancellationToken),
-        _ => ScanStatistics.Build(folder, now, cancellationToken).Ages
-            .Select(static age => new BreakdownSlice(age.Label, age.Size, age.FileCount))
-            .ToArray()
+        BreakdownKind.Categories => ByCategory(folder, useAllocated, cancellationToken),
+        _ => ByAge(folder, now, useAllocated, cancellationToken)
     };
 
-    private static IReadOnlyList<BreakdownSlice> ByCategory(ScanNode folder, CancellationToken cancellationToken)
+    private static IReadOnlyList<BreakdownSlice> ByCategory(ScanNode folder, bool useAllocated, CancellationToken cancellationToken)
     {
         var sizes = new Dictionary<FileTypeCategory, (long Size, long Count)>();
         var visited = 0;
@@ -453,12 +459,32 @@ public static class FolderBreakdown
             }
             var category = FileTypeCategories.Classify(file.Extension);
             sizes.TryGetValue(category, out var total);
-            sizes[category] = (total.Size + file.Size, total.Count + 1);
+            sizes[category] = (total.Size + (useAllocated ? file.AllocatedSize : file.Size), total.Count + 1);
         }
         return sizes
             .Where(static pair => pair.Value.Size > 0)
             .OrderByDescending(static pair => pair.Value.Size)
             .Select(static pair => new BreakdownSlice(pair.Key.ToString(), pair.Value.Size, pair.Value.Count))
+            .ToArray();
+    }
+
+    private static IReadOnlyList<BreakdownSlice> ByAge(ScanNode folder, DateTimeOffset now, bool useAllocated, CancellationToken cancellationToken)
+    {
+        var sizes = new long[ScanStatistics.AgeLabels.Count];
+        var counts = new long[ScanStatistics.AgeLabels.Count];
+        var visited = 0;
+        foreach (var file in folder.Files())
+        {
+            if ((++visited & 0xFFFF) == 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+            var ageIndex = ScanStatistics.GetAgeBucket(now - file.LastWriteUtc);
+            sizes[ageIndex] += useAllocated ? file.AllocatedSize : file.Size;
+            counts[ageIndex]++;
+        }
+        return ScanStatistics.AgeLabels
+            .Select((label, index) => new BreakdownSlice(label, sizes[index], counts[index]))
             .ToArray();
     }
 

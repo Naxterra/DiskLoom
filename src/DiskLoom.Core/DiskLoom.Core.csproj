@@ -4,6 +4,7 @@
     <SupportedOSPlatformVersion>10.0.22000.0</SupportedOSPlatformVersion>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <Version>0.1.29</Version>
     <PackageId>Naxterra.DiskLoom.Core</PackageId>
     <Description>Core Windows filesystem scanning and storage-analysis engine for DiskLoom.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>

@@ -64,6 +64,9 @@
       <Component Id="MainExecutable" Directory="APPLICATIONFOLDER" Guid="{B2C6B468-F975-47AC-89EE-D8CC670A74DC}">
         <File Id="DiskLoomExe" Source="!(bindpath.Publish)\DiskLoom.exe" KeyPath="yes" />
       </Component>
+      <Component Id="CoreLibrary" Directory="APPLICATIONFOLDER" Guid="{E4A91C3B-52D8-4B61-8F07-3A94D1E62C58}">
+        <File Id="DiskLoomCoreDll" Source="!(bindpath.Publish)\DiskLoom.Core.dll" KeyPath="yes" />
+      </Component>
 
       <Feature Id="StartMenuShortcutFeature" Title="!(loc.StartMenuFeatureTitle)" Description="!(loc.StartMenuFeatureDescription)" Level="1" AllowAbsent="yes" AllowAdvertise="no" InstallDefault="local" TypicalDefault="install">
         <Component Id="DiskLoomStartMenuShortcutComponent" Directory="ProgramMenuDir" Guid="{C336DA15-734C-40D1-A5E8-548F03A1865B}">
@@ -92,22 +95,28 @@
         </Component>
       </Feature>
 
-      <Component Id="ShellIntegration" Directory="APPLICATIONFOLDER" Guid="{144E67B2-5703-476A-91DE-54D7E5733CB6}">
-        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\DiskLoom" Value="[DISKLOOM_SHELL_SCAN]" Type="string" KeyPath="yes" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\DiskLoom" Name="Icon" Value="[APPLICATIONFOLDER]Assets\AppIcon.ico,0" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\DiskLoom\command" Value="&quot;[APPLICATIONFOLDER]DiskLoom.exe&quot; --scan &quot;%V&quot;" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\DiskLoom" Value="[DISKLOOM_SHELL_SCAN_FOLDER]" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\DiskLoom" Name="Icon" Value="[APPLICATIONFOLDER]Assets\AppIcon.ico,0" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\DiskLoom\command" Value="&quot;[APPLICATIONFOLDER]DiskLoom.exe&quot; --scan &quot;%V&quot;" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Drive\shell\DiskLoom" Value="[DISKLOOM_SHELL_SCAN]" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Drive\shell\DiskLoom" Name="Icon" Value="[APPLICATIONFOLDER]Assets\AppIcon.ico,0" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Drive\shell\DiskLoom\command" Value="&quot;[APPLICATIONFOLDER]DiskLoom.exe&quot; --scan &quot;%V&quot;" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\DiskLoom.exe" Value="[APPLICATIONFOLDER]DiskLoom.exe" Type="string" />
+      <Feature Id="ExplorerIntegrationFeature" Title="!(loc.ExplorerFeatureTitle)" Description="!(loc.ExplorerFeatureDescription)" Level="1" AllowAbsent="yes" AllowAdvertise="no" InstallDefault="local" TypicalDefault="install">
+        <Component Id="ShellIntegration" Directory="APPLICATIONFOLDER" Guid="{144E67B2-5703-476A-91DE-54D7E5733CB6}">
+          <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\DiskLoom" Value="[DISKLOOM_SHELL_SCAN]" Type="string" KeyPath="yes" />
+          <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\DiskLoom" Name="Icon" Value="[APPLICATIONFOLDER]Assets\AppIcon.ico,0" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Classes\Directory\shell\DiskLoom\command" Value="&quot;[APPLICATIONFOLDER]DiskLoom.exe&quot; --scan &quot;%V&quot;" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\DiskLoom" Value="[DISKLOOM_SHELL_SCAN_FOLDER]" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\DiskLoom" Name="Icon" Value="[APPLICATIONFOLDER]Assets\AppIcon.ico,0" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Classes\Directory\Background\shell\DiskLoom\command" Value="&quot;[APPLICATIONFOLDER]DiskLoom.exe&quot; --scan &quot;%V&quot;" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Classes\Drive\shell\DiskLoom" Value="[DISKLOOM_SHELL_SCAN]" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Classes\Drive\shell\DiskLoom" Name="Icon" Value="[APPLICATIONFOLDER]Assets\AppIcon.ico,0" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Classes\Drive\shell\DiskLoom\command" Value="&quot;[APPLICATIONFOLDER]DiskLoom.exe&quot; --scan &quot;%V&quot;" Type="string" />
+        </Component>
+      </Feature>
+
+      <Component Id="AppPathsRegistration" Directory="APPLICATIONFOLDER" Guid="{8D3B7B2A-6142-4F58-9A14-7C5E9120D8E4}">
+        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\DiskLoom.exe" Value="[APPLICATIONFOLDER]DiskLoom.exe" Type="string" KeyPath="yes" />
         <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\DiskLoom.exe" Name="Path" Value="[APPLICATIONFOLDER]" Type="string" />
       </Component>
 
       <Files Directory="APPLICATIONFOLDER" Include="!(bindpath.Publish)\**">
         <Exclude Files="!(bindpath.Publish)\DiskLoom.exe" />
+        <Exclude Files="!(bindpath.Publish)\DiskLoom.Core.dll" />
         <Exclude Files="!(bindpath.Publish)\**\*.pdb" />
       </Files>
     </Feature>

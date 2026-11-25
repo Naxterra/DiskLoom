@@ -1,6 +1,7 @@
 using Microsoft.UI.Xaml;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using DiskLoom.Services;
 using Microsoft.UI.Dispatching;
 using Microsoft.Windows.AppLifecycle;
 using Windows.ApplicationModel.Activation;
@@ -16,11 +17,13 @@ public partial class App : Application
     public static nint WindowHandle => WinRT.Interop.WindowNative.GetWindowHandle(Window);
     public static string? StartupScanPath { get; private set; }
     public static string CurrentLanguage { get; private set; } = "en-US";
+    internal static AppSettings Settings { get; set; } = new();
 
     public App()
     {
         Program.RedirectedActivation += Program_RedirectedActivation;
-        CurrentLanguage = LoadLanguage();
+        Settings = AppSettings.Load();
+        CurrentLanguage = AppSettings.ResolveLanguage(Settings);
         Microsoft.Windows.Globalization.ApplicationLanguages.PrimaryLanguageOverride = CurrentLanguage;
         var uiCulture = CultureInfo.GetCultureInfo(CurrentLanguage);
         CultureInfo.CurrentUICulture = uiCulture;
@@ -147,9 +150,8 @@ public partial class App : Application
             return;
         }
 
-        var settingsDirectory = GetSettingsDirectory();
-        Directory.CreateDirectory(settingsDirectory);
-        DiskLoom.Core.Services.AtomicFile.WriteAllText(Path.Combine(settingsDirectory, "language.txt"), language);
+        Settings = Settings with { Language = language };
+        AppSettings.Save(Settings);
 
         var executablePath = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(executablePath))
@@ -178,36 +180,6 @@ public partial class App : Application
             throw;
         }
     }
-
-    private static string LoadLanguage()
-    {
-        var environmentOverride = Environment.GetEnvironmentVariable("DISKLOOM_LANGUAGE");
-        if (environmentOverride is "en-US" or "de-DE")
-        {
-            return environmentOverride;
-        }
-
-        try
-        {
-            var path = Path.Combine(GetSettingsDirectory(), "language.txt");
-            if (File.Exists(path) && File.ReadAllText(path).Trim() is { } saved && saved is "en-US" or "de-DE")
-            {
-                return saved;
-            }
-        }
-        catch
-        {
-            // Fall back to the Windows UI language if settings are unavailable.
-        }
-
-        return CultureInfo.CurrentUICulture.TwoLetterISOLanguageName.Equals("de", StringComparison.OrdinalIgnoreCase)
-            ? "de-DE"
-            : "en-US";
-    }
-
-    private static string GetSettingsDirectory() => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "DiskLoom");
 
     private static void WriteCrashLog(Exception exception)
     {

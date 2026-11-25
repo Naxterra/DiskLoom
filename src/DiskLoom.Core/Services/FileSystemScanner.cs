@@ -20,7 +20,7 @@ public sealed class FileSystemScanner
         options ??= new ScanOptions();
 
         var normalizedPath = ScanPaths.Normalize(path);
-        if (!Directory.Exists(normalizedPath))
+        if (!Directory.Exists(WindowsPaths.ToExtended(normalizedPath)))
         {
             throw new DirectoryNotFoundException($"The scan path does not exist: {normalizedPath}");
         }
@@ -28,7 +28,7 @@ public sealed class FileSystemScanner
         var startedUtc = DateTimeOffset.UtcNow;
         var stopwatch = Stopwatch.StartNew();
         var issues = new ConcurrentBag<ScanIssue>();
-        var rootInfo = new DirectoryInfo(normalizedPath);
+        var rootInfo = new DirectoryInfo(WindowsPaths.ToExtended(normalizedPath));
         var root = CreateDirectoryNode(rootInfo);
         var allocationUnitSize = NativeFileSize.GetAllocationUnitSize(normalizedPath);
         var channel = Channel.CreateUnbounded<ScanNode>(new UnboundedChannelOptions
@@ -207,13 +207,13 @@ public sealed class FileSystemScanner
                     {
                         var size = entry.Length;
                         // Directory enumeration reports no link count (0 = unknown); precise mode
-                        // opens each file and reads the real one.
+                        // opens each file for attributes only and reads the real one.
                         var storage = !options.CalculateAllocatedSize
-                            ? new FileStorageInfo(size, 0, 0, 0)
+                            ? new FileStorageInfo(size, 0, 0, 0, 0)
                             : options.PreciseAllocationSize
                                 ? NativeFileSize.GetStorageInfo(entry.FullPath, size)
                                 : entry.HasNativeAllocation
-                                    ? new FileStorageInfo(entry.AllocationSize, entry.VolumeSerialNumber, entry.FileId, 0)
+                                    ? new FileStorageInfo(entry.AllocationSize, entry.VolumeSerialNumber, entry.FileId, entry.FileIdHigh, 0)
                                     : NativeFileSize.GetFastStorageInfo(entry.FullPath, size, entry.Attributes, allocationUnitSize);
                         var allocated = storage.AllocatedSize;
                         var file = new ScanNode
@@ -231,14 +231,16 @@ public sealed class FileSystemScanner
                             Attributes = entry.Attributes,
                             VolumeSerialNumber = storage.VolumeSerialNumber,
                             FileId = storage.FileId,
+                            FileIdHigh = storage.FileIdHigh,
+                            ReparsePointTag = entry.ReparsePointTag,
                             HardLinkCount = storage.HardLinkCount,
                             PhysicalAllocatedSize = allocated
                         };
                         // Which path carries shared data is decided after the scan (AttributeSharedFiles);
                         // deciding here would depend on which worker thread got there first.
-                        if (options.DeduplicateHardLinkAllocation && storage.FileId != 0)
+                        if (options.DeduplicateHardLinkAllocation && file.Identity.HasIdentity)
                         {
-                            var first = physicalFiles.GetOrAdd(new FileIdentity(storage.VolumeSerialNumber, storage.FileId), file);
+                            var first = physicalFiles.GetOrAdd(file.Identity, file);
                             if (!ReferenceEquals(first, file))
                             {
                                 sharedFiles.Add(first);
@@ -303,6 +305,7 @@ public sealed class FileSystemScanner
                 isDirectory ? 0 : ((FileInfo)entry).Length,
                 0,
                 0,
+                0,
                 entry.CreationTimeUtc,
                 entry.LastWriteTimeUtc,
                 entry.LastAccessTimeUtc,
@@ -339,8 +342,10 @@ public sealed class FileSystemScanner
         return false;
     }
 
-    private static bool IsCloudPlaceholder(uint reparsePointTag) =>
+    public static bool IsCloudPlaceholder(uint reparsePointTag) =>
         (reparsePointTag & 0xFFFF0FFFu) == 0x9000001Au;
+
+    public static uint GetReparsePointTag(string path) => NativeDirectoryReader.GetReparsePointTag(path);
 
     private static ScanNode CreateDirectoryNode(DirectoryEntryData entry) => new()
     {
@@ -352,7 +357,9 @@ public sealed class FileSystemScanner
         LastAccessUtc = entry.LastAccessTimeUtc,
         Attributes = entry.Attributes,
         VolumeSerialNumber = entry.VolumeSerialNumber,
-        FileId = entry.FileId
+        FileId = entry.FileId,
+        FileIdHigh = entry.FileIdHigh,
+        ReparsePointTag = entry.ReparsePointTag
     };
 
     private static ScanNode CreateDirectoryNode(DirectoryInfo info)
@@ -375,8 +382,8 @@ public sealed class FileSystemScanner
 
         return new ScanNode
         {
-            Name = string.IsNullOrWhiteSpace(info.Name) ? info.FullName : info.Name,
-            FullPath = info.FullName,
+            Name = WindowsPaths.StripExtendedPrefix(string.IsNullOrWhiteSpace(info.Name) ? info.FullName : info.Name),
+            FullPath = WindowsPaths.StripExtendedPrefix(info.FullName),
             IsDirectory = true,
             CreatedUtc = created,
             LastWriteUtc = written,
@@ -452,7 +459,7 @@ public sealed class FileSystemScanner
             return path;
         }
         return FileState.ReadIdentity(WindowsPaths.ToExtended(path)) is { } identity
-            ? $"ID:{identity.VolumeSerialNumber:X8}:{identity.FileId:X16}"
+            ? $"ID:{identity.VolumeSerialNumber:X8}:{identity.FileIdHigh:X16}:{identity.FileIdLow:X16}"
             : null;
     }
 
@@ -515,8 +522,7 @@ public sealed class FileSystemScanner
         PathTooLongException or
         System.Security.SecurityException;
 
-    private readonly record struct FileIdentity(uint VolumeSerialNumber, ulong FileId);
-    private readonly record struct FileStorageInfo(long AllocatedSize, uint VolumeSerialNumber, ulong FileId, uint HardLinkCount);
+    private readonly record struct FileStorageInfo(long AllocatedSize, uint VolumeSerialNumber, ulong FileId, ulong FileIdHigh, uint HardLinkCount);
     private readonly record struct DirectoryEntryData(
         string Name,
         string FullPath,
@@ -524,6 +530,7 @@ public sealed class FileSystemScanner
         long Length,
         long AllocationSize,
         ulong FileId,
+        ulong FileIdHigh,
         DateTimeOffset CreationTimeUtc,
         DateTimeOffset LastWriteTimeUtc,
         DateTimeOffset LastAccessTimeUtc,
@@ -616,15 +623,14 @@ public sealed class FileSystemScanner
                             var attributes = (FileAttributes)(uint)Marshal.ReadInt32(current, 56);
                             var lowFileId = unchecked((ulong)Marshal.ReadInt64(current, 72));
                             var highFileId = unchecked((ulong)Marshal.ReadInt64(current, 80));
-                            var rotatedHigh = (highFileId << 17) | (highFileId >> 47);
-                            var fileId = lowFileId ^ rotatedHigh;
                             results.Add(new DirectoryEntryData(
                                 name,
                                 Path.Combine(directoryPath, name),
                                 (attributes & FileAttributes.Directory) != 0,
                                 Math.Max(0, Marshal.ReadInt64(current, 40)),
                                 Math.Max(0, Marshal.ReadInt64(current, 48)),
-                                fileId,
+                                lowFileId,
+                                highFileId,
                                 FromFileTime(Marshal.ReadInt64(current, 8)),
                                 FromFileTime(Marshal.ReadInt64(current, 24)),
                                 FromFileTime(Marshal.ReadInt64(current, 16)),
@@ -790,7 +796,7 @@ public sealed class FileSystemScanner
         {
             if (length <= 0)
             {
-                return new FileStorageInfo(0, 0, 0, 0);
+                return new FileStorageInfo(0, 0, 0, 0, 0);
             }
 
             if ((attributes & (FileAttributes.Compressed | FileAttributes.SparseFile)) != 0 && OperatingSystem.IsWindows())
@@ -801,7 +807,7 @@ public sealed class FileSystemScanner
                     var compressed = ((ulong)high << 32) | low;
                     if (compressed <= long.MaxValue)
                     {
-                        return new FileStorageInfo((long)compressed, 0, 0, 0);
+                        return new FileStorageInfo((long)compressed, 0, 0, 0, 0);
                     }
                 }
             }
@@ -809,54 +815,70 @@ public sealed class FileSystemScanner
             var unit = Math.Max(512, allocationUnitSize);
             var remainder = length % unit;
             var allocated = remainder == 0 ? length : length + (unit - remainder);
-            return new FileStorageInfo(allocated, 0, 0, 0);
+            return new FileStorageInfo(allocated, 0, 0, 0, 0);
         }
 
         public static FileStorageInfo GetStorageInfo(string path, long fallbackLength)
         {
             if (!OperatingSystem.IsWindows())
             {
-                return new FileStorageInfo(fallbackLength, 0, 0, 0);
+                return new FileStorageInfo(fallbackLength, 0, 0, 0, 0);
             }
 
-            try
+            const uint fileReadAttributes = 0x0080;
+            const uint fileShareAll = 0x0001 | 0x0002 | 0x0004;
+            const uint openExisting = 3;
+            const uint fileFlagBackupSemantics = 0x02000000;
+            const uint fileFlagOpenReparsePoint = 0x00200000;
+
+            using (var handle = CreateFile(
+                WindowsPaths.ToExtended(path),
+                fileReadAttributes,
+                fileShareAll,
+                IntPtr.Zero,
+                openExisting,
+                fileFlagBackupSemantics | fileFlagOpenReparsePoint,
+                IntPtr.Zero))
             {
-                using var handle = File.OpenHandle(
-                    WindowsPaths.ToExtended(path),
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete,
-                    FileOptions.None);
-                var hasStandardInfo = GetFileInformationByHandleEx(
+                if (!handle.IsInvalid)
+                {
+                    var hasStandardInfo = GetFileInformationByHandleEx(
                         handle,
                         FileInfoByHandleClass.FileStandardInfo,
                         out var standardInfo,
                         (uint)Marshal.SizeOf<FileStandardInfo>());
-                var hasIdentity = GetFileInformationByHandle(handle, out var handleInfo);
-                if (hasStandardInfo)
-                {
-                    var fileId = hasIdentity ? ((ulong)handleInfo.FileIndexHigh << 32) | handleInfo.FileIndexLow : 0;
-                    return new FileStorageInfo(
-                        Math.Max(0, standardInfo.AllocationSize),
-                        hasIdentity ? handleInfo.VolumeSerialNumber : 0,
-                        fileId,
-                        hasIdentity ? Math.Max(1, handleInfo.NumberOfLinks) : 1);
+                    if (hasStandardInfo)
+                    {
+                        var identity = FileState.ReadIdentity(handle);
+                        return new FileStorageInfo(
+                            Math.Max(0, standardInfo.AllocationSize),
+                            identity?.VolumeSerialNumber ?? 0,
+                            identity?.FileIdLow ?? 0,
+                            identity?.FileIdHigh ?? 0,
+                            Math.Max(1u, standardInfo.NumberOfLinks));
+                    }
                 }
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-            {
-                // Fall through to the path-based API, which can succeed with less access.
             }
 
             var low = GetCompressedFileSize(WindowsPaths.ToExtended(path), out var high);
             if (low == uint.MaxValue && Marshal.GetLastWin32Error() != 0)
             {
-                return new FileStorageInfo(fallbackLength, 0, 0, 0);
+                return new FileStorageInfo(fallbackLength, 0, 0, 0, 0);
             }
 
             var value = ((ulong)high << 32) | low;
-            return new FileStorageInfo(value > long.MaxValue ? fallbackLength : (long)value, 0, 0, 0);
+            return new FileStorageInfo(value > long.MaxValue ? fallbackLength : (long)value, 0, 0, 0, 0);
         }
+
+        [DllImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern SafeFileHandle CreateFile(
+            string fileName,
+            uint desiredAccess,
+            uint shareMode,
+            IntPtr securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            IntPtr templateFile);
 
         [DllImport("kernel32.dll", EntryPoint = "GetCompressedFileSizeW", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern uint GetCompressedFileSize(string fileName, out uint fileSizeHigh);
@@ -878,12 +900,6 @@ public sealed class FileSystemScanner
             out FileStandardInfo fileInformation,
             uint bufferSize);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GetFileInformationByHandle(
-            SafeFileHandle fileHandle,
-            out ByHandleFileInformation fileInformation);
-
         private enum FileInfoByHandleClass
         {
             FileStandardInfo = 1
@@ -897,21 +913,6 @@ public sealed class FileSystemScanner
             public uint NumberOfLinks;
             [MarshalAs(UnmanagedType.U1)] public bool DeletePending;
             [MarshalAs(UnmanagedType.U1)] public bool Directory;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct ByHandleFileInformation
-        {
-            public uint FileAttributes;
-            public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
-            public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
-            public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
-            public uint VolumeSerialNumber;
-            public uint FileSizeHigh;
-            public uint FileSizeLow;
-            public uint NumberOfLinks;
-            public uint FileIndexHigh;
-            public uint FileIndexLow;
         }
     }
 }

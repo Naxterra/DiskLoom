@@ -10,7 +10,7 @@ DiskLoom is a clean-room Windows 11 storage analyzer built with C#, .NET 11, Win
 
 - Cancellable, 1–32 worker scanning with batched native allocation/file-ID enumeration on Windows and managed fallback for unsupported filesystems
 - Logical size and Windows allocation-size (“size on disk”) accounting
-- Safe default handling of junctions/symlinks, hidden/system files, exclusions, access failures, and files changing during a scan
+- Safe default handling of junctions/symlinks, hidden/system files, optional exclusions, access failures, and files changing during a scan
 - Fluent Windows 11 UI with Mica, system light/dark theme, folder tree, sortable details, treemap, and drive overview
 - Results while scanning: top-level folders and their growing sizes appear within a second, long before a large drive finishes
 - Share-of-parent bars in the folder tree and results list; drives show how full they are
@@ -24,16 +24,16 @@ DiskLoom is a clean-room Windows 11 storage analyzer built with C#, .NET 11, Win
 - Open, Explorer reveal, Properties, copy path, Copy to…/Move to… (Explorer's own copy engine with progress, conflict prompts, and Undo), Recycle Bin, and explicit permanent deletion
 - Compressed `.diskloom` snapshots and size-delta comparison
 - CSV, JSON, Excel (.xlsx), HTML, and PDF export of the whole scan or the current folder, with a folder-depth limit and an option to leave out files
-- `DiskLoom.Cli.exe` for scheduled/headless scans, exports, snapshots, and duplicate reports
-- Self-contained x64 portable output and WiX MSI with selectable Start-menu/Desktop shortcuts, Apps & Features, major upgrades, and Explorer folder/drive context menus
+- `DiskLoom.Cli.exe` for headless scans, exports, snapshots, and duplicate reports
+- Self-contained x64 portable output and WiX MSI with selectable Start-menu/Desktop shortcuts, Apps & Features, major upgrades, and selectable Explorer folder/drive context menus
 - Update check against GitHub Releases with in-place install after you confirm: HTTPS only, SHA-256 checked against GitHub's asset digest, package identity and version checked, and Authenticode pinned when a publisher certificate is configured
 - No subscription, telemetry, account, ads, or cloud dependency
 
 ## Deliberate v1 boundaries
 
-The current scanner uses parallel Win32/.NET directory enumeration. Direct raw-NTFS MFT parsing, MTP devices, SSH, WebDAV URLs, and provider-specific cloud APIs are not presented as finished features. Mapped/cloud-synced folders and ordinary UNC/WebDAV-mounted paths work through the Windows filesystem. Owner/permission statistics are out of scope.
+DiskLoom targets local drives, folders, and connected USB storage. The current scanner uses parallel Win32/.NET directory enumeration. Direct raw-NTFS MFT parsing, network/UNC shares, MTP devices, SSH, WebDAV URLs, scheduled scans, and provider-specific cloud APIs are not part of DiskLoom. Locally synced cloud folders work through the Windows filesystem without downloading online-only placeholders. Owner/permission statistics are out of scope.
 
-This distinction matters: DiskLoom 0.1 is a usable local/UNC replacement for the common disk-analysis workflow, not yet a claim of byte-for-byte parity with every feature accumulated by TreeSize Professional.
+This distinction matters: DiskLoom 0.1 is a usable local-storage replacement for the common disk-analysis workflow, not yet a claim of byte-for-byte parity with every feature accumulated by TreeSize Professional.
 
 ## Build
 
@@ -51,15 +51,15 @@ pwsh -File tools\Build-DiskLoomInstaller.ps1
 
 The ready-to-install English and German MSIs are written to `artifacts\DiskLoom\installer\DiskLoom-Setup-x64.msi` and `DiskLoom-Setup-x64-de-DE.msi`. The portable/self-contained build is under `artifacts\DiskLoom\win-x64`.
 
-## CLI and scheduled scans
+## CLI
 
 ```powershell
 DiskLoom.Cli.exe --scan "D:\Data" --export "D:\Reports\disk.csv" --snapshot "D:\Reports\disk.diskloom"
 DiskLoom.Cli.exe --scan E:\ --export "D:\Reports\usb.xlsx" --depth 3 --no-files
-DiskLoom.Cli.exe --scan "\\server\share" --duplicates "D:\Reports\duplicates.csv" --min-duplicate-mb 10
+DiskLoom.Cli.exe --scan "D:\Archive" --duplicates "D:\Reports\duplicates.csv" --min-duplicate-mb 10
 ```
 
-Run `DiskLoom.Cli.exe --help` for all switches. Use `tools\Register-DiskLoomScheduledScan.ps1` to register a daily or weekly Windows scheduled task after installation.
+Run `DiskLoom.Cli.exe --help` for all switches.
 
 ## GitHub update checks and updates
 
@@ -84,7 +84,7 @@ DiskLoom never installs an update without asking, and never installs one whose d
 
 ## Uninstalling
 
-Uninstalling DiskLoom in Apps & Features removes the program, its shortcuts and the Explorer menu entries. Your own settings and caches stay in `%LOCALAPPDATA%\DiskLoom` (column layout, language, the PDF export engine's data, downloaded updates and the crash log); delete that folder to remove them as well. A scheduled scan registered with `tools\Register-DiskLoomScheduledScan.ps1` is not part of the installation, so remove it in Task Scheduler (task name `DiskLoom Storage Report`) before or after uninstalling.
+Uninstalling DiskLoom in Apps & Features removes the program, its shortcuts and the Explorer menu entries. Your own settings and caches stay in `%LOCALAPPDATA%\DiskLoom` (column layout, language, the PDF export engine's data, downloaded updates and the crash log); delete that folder to remove them as well.
 
 ## Safety
 

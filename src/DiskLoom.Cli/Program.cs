@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using DiskLoom.Core.Models;
 using DiskLoom.Core.Services;
@@ -26,26 +27,36 @@ internal static class DiskLoomCli
 
             var scanner = new FileSystemScanner();
             var lastProgress = DateTimeOffset.MinValue;
-            var progress = new Progress<ScanProgress>(value =>
-            {
-                if (DateTimeOffset.UtcNow - lastProgress < TimeSpan.FromMilliseconds(250))
+            var wroteProgress = false;
+            var progress = Console.IsOutputRedirected
+                ? null
+                : new Progress<ScanProgress>(value =>
                 {
-                    return;
-                }
-                lastProgress = DateTimeOffset.UtcNow;
-                Console.Write($"\rScanning {value.FilesScanned,12:N0} files  {ByteFormatter.Format(value.BytesScanned),12}  {value.CurrentPath.Truncate(70),-70}");
-            });
+                    if (DateTimeOffset.UtcNow - lastProgress < TimeSpan.FromMilliseconds(250))
+                    {
+                        return;
+                    }
+                    lastProgress = DateTimeOffset.UtcNow;
+                    wroteProgress = true;
+                    Console.Write($"\rScanning {value.FilesScanned,12:N0} files  {ByteFormatter.Format(value.BytesScanned),12}  {value.CurrentPath.Truncate(70),-70}");
+                });
+
+            var excludes = options.ExcludeSystem
+                ? [.. ScanOptions.SystemProtectedFolderPatterns, .. options.Excludes]
+                : options.Excludes.ToArray();
 
             var result = await scanner.ScanAsync(options.ScanPath, new ScanOptions
             {
                 Parallelism = options.Parallelism,
                 CalculateAllocatedSize = true,
                 FollowReparsePoints = options.FollowLinks,
-                // --exclude adds to the default exclusions ($RECYCLE.BIN, System Volume Information) instead of replacing them.
-                ExcludePatterns = [.. new ScanOptions().ExcludePatterns, .. options.Excludes]
+                ExcludePatterns = excludes
             }, progress, cancellation.Token);
 
-            Console.WriteLine();
+            if (wroteProgress)
+            {
+                Console.WriteLine();
+            }
             Console.WriteLine($"Scanned {result.Root.FileCount:N0} files in {result.Root.FolderCount + 1:N0} folders.");
             Console.WriteLine($"Logical: {ByteFormatter.Format(result.Root.Size)}  Allocated: {ByteFormatter.Format(result.Root.AllocatedSize)}  Issues: {result.Issues.Count:N0}");
 
@@ -59,7 +70,8 @@ internal static class DiskLoomCli
                     ".json" => null,
                     ".xlsx" => await reports.ExportXlsxAsync(result, options.ExportPath, exportOptions, cancellationToken: cancellation.Token),
                     ".html" or ".htm" => await reports.ExportHtmlAsync(result, options.ExportPath, exportOptions, cancellationToken: cancellation.Token),
-                    _ => await exporter.ExportCsvAsync(result, options.ExportPath, exportOptions, cancellation.Token)
+                    ".csv" => await exporter.ExportCsvAsync(result, options.ExportPath, exportOptions, cancellation.Token),
+                    var extension => throw new ArgumentException($"Unsupported export format '{extension}'. Supported formats: .csv, .xlsx, .html, .json.")
                 };
                 if (summary is null)
                 {
@@ -106,6 +118,7 @@ internal static class DiskLoomCli
         string? snapshotPath = null;
         string? duplicatesPath = null;
         var excludes = new List<string>();
+        var excludeSystem = false;
         var parallelism = Math.Clamp(Environment.ProcessorCount, 2, 32);
         var minimumDuplicateBytes = 1024L * 1024;
         var followLinks = false;
@@ -127,14 +140,45 @@ internal static class DiskLoomCli
             switch (argument.ToLowerInvariant())
             {
                 case "--scan": scanPath = NextValue(); break;
-                case "--export": exportPath = NextValue(); break;
+                case "--export":
+                    exportPath = NextValue();
+                    var extension = Path.GetExtension(exportPath).ToLowerInvariant();
+                    if (extension is not (".csv" or ".json" or ".xlsx" or ".html" or ".htm"))
+                    {
+                        throw new ArgumentException($"Unsupported export format '{extension}'. Supported formats: .csv, .xlsx, .html, .json.");
+                    }
+                    break;
                 case "--snapshot": snapshotPath = NextValue(); break;
                 case "--duplicates": duplicatesPath = NextValue(); break;
                 case "--exclude": excludes.Add(NextValue()); break;
-                case "--parallel": parallelism = Math.Clamp(int.Parse(NextValue()), 1, 32); break;
-                case "--min-duplicate-mb": minimumDuplicateBytes = checked((long)(double.Parse(NextValue(), System.Globalization.CultureInfo.InvariantCulture) * 1024 * 1024)); break;
+                case "--exclude-system": excludeSystem = true; break;
+                case "--parallel":
+                    if (!int.TryParse(NextValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var workers) || workers < 1)
+                    {
+                        throw new ArgumentException("--parallel requires a positive integer.");
+                    }
+                    parallelism = Math.Clamp(workers, 1, 32);
+                    break;
+                case "--min-duplicate-mb":
+                    if (!double.TryParse(NextValue(), NumberStyles.Float, CultureInfo.InvariantCulture, out var mb) || !double.IsFinite(mb) || mb < 0)
+                    {
+                        throw new ArgumentException("--min-duplicate-mb requires a non-negative finite number.");
+                    }
+                    var bytes = mb * 1024 * 1024;
+                    if (bytes > long.MaxValue)
+                    {
+                        throw new ArgumentException("--min-duplicate-mb is too large.");
+                    }
+                    minimumDuplicateBytes = (long)bytes;
+                    break;
                 case "--follow-links": followLinks = true; break;
-                case "--depth": depth = Math.Max(0, int.Parse(NextValue(), System.Globalization.CultureInfo.InvariantCulture)); break;
+                case "--depth":
+                    if (!int.TryParse(NextValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedDepth) || parsedDepth < 0)
+                    {
+                        throw new ArgumentException("--depth requires a non-negative integer.");
+                    }
+                    depth = parsedDepth;
+                    break;
                 case "--no-files": includeFiles = false; break;
                 default: throw new ArgumentException($"Unknown option: {argument}");
             }
@@ -144,7 +188,7 @@ internal static class DiskLoomCli
         {
             throw new ArgumentException("--scan PATH is required.");
         }
-        return new CliOptions(scanPath, exportPath, snapshotPath, duplicatesPath, excludes, parallelism, minimumDuplicateBytes, followLinks, depth, includeFiles);
+        return new CliOptions(scanPath, exportPath, snapshotPath, duplicatesPath, excludes, excludeSystem, parallelism, minimumDuplicateBytes, followLinks, depth, includeFiles);
     }
 
     private static Task ExportDuplicatesAsync(DuplicateResult result, string path, CancellationToken cancellationToken) =>
@@ -189,7 +233,8 @@ internal static class DiskLoomCli
               --snapshot FILE           Save a compressed .diskloom snapshot
               --duplicates FILE         Verify duplicates and export them as CSV
               --min-duplicate-mb NUMBER Ignore smaller files (default: 1 MB)
-              --exclude PATTERN         Also exclude a name or path wildcard (repeatable)
+              --exclude PATTERN         Exclude a name or path wildcard (repeatable)
+              --exclude-system          Exclude $RECYCLE.BIN and System Volume Information
               --parallel NUMBER         Directory workers, 1–32
               --follow-links            Follow directory links, counting each folder once
               --help                    Show this help
@@ -204,6 +249,7 @@ internal static class DiskLoomCli
         string? SnapshotPath,
         string? DuplicatesPath,
         IReadOnlyList<string> Excludes,
+        bool ExcludeSystem,
         int Parallelism,
         long MinimumDuplicateBytes,
         bool FollowLinks,

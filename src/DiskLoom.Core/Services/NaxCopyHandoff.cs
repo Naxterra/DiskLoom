@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Text;
 using Microsoft.Win32;
 
@@ -109,15 +110,23 @@ public static class NaxCopyHandoff
         {
             while (true)
             {
-                var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+                var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous,
+                    TokenImpersonationLevel.Identification);
                 try
                 {
                     await pipe.ConnectAsync(250, cancellationToken);
-                    return pipe;
+                    if (IsExpectedServer(pipe, app)) return pipe;
+                    await pipe.DisposeAsync();
+                    return null;
                 }
                 catch (TimeoutException)
                 {
                     await pipe.DisposeAsync();
+                }
+                catch
+                {
+                    await pipe.DisposeAsync();
+                    throw;
                 }
 
                 started ??= Process.Start(new ProcessStartInfo(app, "--background") { UseShellExecute = false });
@@ -131,6 +140,36 @@ public static class NaxCopyHandoff
         finally
         {
             started?.Dispose();
+        }
+    }
+
+    private static bool IsExpectedServer(NamedPipeClientStream pipe, string app)
+    {
+        if (!GetNamedPipeServerProcessId(pipe.SafePipeHandle.DangerousGetHandle(), out var server) ||
+            server == 0 || server > int.MaxValue)
+        {
+            return false;
+        }
+        const uint processQueryLimitedInformation = 0x1000;
+        var handle = OpenProcess(processQueryLimitedInformation, inheritHandle: false, server);
+        if (handle == nint.Zero)
+        {
+            return false;
+        }
+        try
+        {
+            var buffer = new char[1024];
+            var length = (uint)buffer.Length;
+            if (!QueryFullProcessImageName(handle, 0, buffer, ref length) || length == 0)
+            {
+                return false;
+            }
+            var executable = new string(buffer, 0, (int)length);
+            return string.Equals(Path.GetFullPath(executable), Path.GetFullPath(app), StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            CloseHandle(handle);
         }
     }
 
@@ -159,6 +198,17 @@ public static class NaxCopyHandoff
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetNamedPipeServerProcessId(nint pipe, out uint serverProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nint OpenProcess(uint desiredAccess, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, uint processId);
+
+    [DllImport("kernel32.dll", EntryPoint = "QueryFullProcessImageNameW", SetLastError = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryFullProcessImageName(nint process, uint flags, [Out] char[] exeName, ref uint size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(nint handle);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

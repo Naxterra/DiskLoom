@@ -9,12 +9,81 @@ public static class ScanPaths
     public static string Normalize(string path)
     {
         ArgumentNullException.ThrowIfNull(path);
-        var trimmed = Environment.ExpandEnvironmentVariables(path.Trim().Trim('"').Trim());
-        if (trimmed.Length == 2 && char.IsAsciiLetter(trimmed[0]) && trimmed[1] == ':')
+        // Whitespace inside the path can be part of the selected name. Only discard padding
+        // around quotes; trimming an unquoted path would silently select its ordinary-name twin.
+        var quoted = path.Trim();
+        var expanded = Environment.ExpandEnvironmentVariables(
+            quoted.StartsWith('"') || quoted.EndsWith('"') ? quoted.Trim('"') : path);
+        if (expanded.Length == 2 && char.IsAsciiLetter(expanded[0]) && expanded[1] == ':')
         {
-            trimmed += Path.DirectorySeparatorChar;
+            expanded += Path.DirectorySeparatorChar;
         }
-        return Path.GetFullPath(trimmed);
+        if (!WindowsPaths.HasTrimmedSegment(expanded) || expanded.StartsWith(@"\\?\", StringComparison.Ordinal))
+        {
+            return Path.GetFullPath(expanded);
+        }
+
+        // Path.GetFullPath also trims dots/spaces from ordinary paths. Resolve the root and
+        // relative segments separately so every real name survives normalization unchanged.
+        expanded = expanded.Replace('/', '\\');
+        var root = Path.GetPathRoot(expanded) ?? string.Empty;
+        var fullRoot = Path.GetFullPath(root.Length == 0 ? "." : root);
+        var segments = new List<string>();
+        foreach (var segment in expanded[root.Length..].Split('\\', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (segment == ".")
+            {
+                continue;
+            }
+            if (segment == "..")
+            {
+                if (segments.Count > 0)
+                {
+                    segments.RemoveAt(segments.Count - 1);
+                }
+                else
+                {
+                    fullRoot = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(fullRoot)) ?? fullRoot;
+                }
+                continue;
+            }
+            segments.Add(segment);
+        }
+        return Path.Combine(fullRoot, Path.Combine(segments.ToArray()));
+    }
+
+    // Splits a path into its root and each ancestor without calling Path.GetFullPath on segments that end in a dot or space.
+    public static IReadOnlyList<string> GetChain(string path)
+    {
+        var fullPath = Normalize(path);
+        var root = Path.GetPathRoot(fullPath);
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return [fullPath];
+        }
+
+        var chain = new List<string> { root };
+        var current = root;
+        foreach (var segment in fullPath[root.Length..].Split(['\\', '/'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            chain.Add(current);
+        }
+        return chain;
+    }
+
+    public static string? GetParent(string path)
+    {
+        var chain = GetChain(path);
+        return chain.Count <= 1 ? null : chain[^2];
+    }
+
+    public static bool IsSameOrInside(string path, string folder)
+    {
+        var fullPath = WindowsPaths.StripExtendedPrefix(Normalize(path)).TrimEnd('\\', '/');
+        var fullFolder = WindowsPaths.StripExtendedPrefix(Normalize(folder)).TrimEnd('\\', '/');
+        return fullPath.Equals(fullFolder, StringComparison.OrdinalIgnoreCase) ||
+               fullPath.StartsWith(fullFolder + "\\", StringComparison.OrdinalIgnoreCase);
     }
 }
 
@@ -24,7 +93,7 @@ internal static class SharedStorage
 {
     public static void Attribute(IEnumerable<ScanNode> sharedFiles)
     {
-        foreach (var group in sharedFiles.GroupBy(static file => (file.VolumeSerialNumber, file.FileId)))
+        foreach (var group in sharedFiles.GroupBy(static file => file.Identity))
         {
             var owner = group.MinBy(static file => file.FullPath, StringComparer.OrdinalIgnoreCase)!;
             foreach (var file in group)
@@ -137,10 +206,18 @@ public static class ScanTreeEditor
         stack.Push(start);
         while (stack.TryPop(out var node))
         {
-            var extended = WindowsPaths.ToExtended(node.FullPath);
-            if (!(node.IsDirectory ? Directory.Exists(extended) : File.Exists(extended)))
+            try
+            {
+                _ = File.GetAttributes(WindowsPaths.ToExtended(node.FullPath));
+            }
+            catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
             {
                 vanished.Add(node.FullPath);
+                continue;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                // A failed access check cannot establish that the item is gone.
                 continue;
             }
 
@@ -183,7 +260,8 @@ public static class ScanTreeEditor
         ScanNode? parent = null;
         foreach (var segment in target[(rootPath.Length + 1)..].Split('\\', StringSplitOptions.RemoveEmptyEntries))
         {
-            var next = current.Children.FirstOrDefault(child => child.Name.Equals(segment, StringComparison.OrdinalIgnoreCase));
+            var next = current.Children.FirstOrDefault(child => child.Name.Equals(segment, StringComparison.Ordinal))
+                ?? current.Children.FirstOrDefault(child => child.Name.Equals(segment, StringComparison.OrdinalIgnoreCase));
             if (next is null)
             {
                 return (null, null, []);

@@ -2,7 +2,8 @@
 <Application
     x:Class="DiskLoom.App"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:DiskLoom">
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
@@ -116,9 +117,9 @@
                 <Setter Property="Template">
                     <Setter.Value>
                         <ControlTemplate TargetType="Thumb">
-                            <Grid Background="Transparent">
+                            <local:SplitterGrid Background="Transparent">
                                 <Border Width="1" HorizontalAlignment="Center" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
-                            </Grid>
+                            </local:SplitterGrid>
                         </ControlTemplate>
                     </Setter.Value>
                 </Setter>
